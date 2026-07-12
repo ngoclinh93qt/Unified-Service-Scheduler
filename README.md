@@ -1,98 +1,157 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Unified Service Scheduler
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+## Overview
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+This repository is a production-shaped first milestone for a vehicle-service scheduler. It exposes one thin but complete vertical slice: create an appointment while the server derives its duration and transactionally assigns an available service bay and qualified technician.
 
-## Description
+The milestone favors a small, reviewable foundation over feature breadth. It includes validation, RFC 9457-style failures, request correlation, structured logs, health checks, OpenAPI, deterministic seed data, PostgreSQL-backed concurrency tests, containerized execution, and CI.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Architecture
 
-## Project setup
+The application is a NestJS modular monolith with one PostgreSQL database. The appointment capability has explicit boundaries:
 
-```bash
-$ pnpm install
-```
+- HTTP validates and documents transport data, invokes the use case, and maps the response. It does not import Prisma types.
+- Application code coordinates reference checks, interval construction, and the booking gateway.
+- Domain code owns pure half-open interval rules and has no NestJS or Prisma dependency.
+- Infrastructure owns Prisma, PostgreSQL transactions, stable row-lock ordering, overlap checks, and persistence.
+- Common modules provide configuration validation, problem details, logging, and request IDs.
 
-## Compile and run the project
+This separation keeps allocation strategy and future concurrency hardening behind the existing public use case without introducing a repository abstraction for every table.
+
+## Prerequisites
+
+- Node.js 22.x
+- Corepack and pnpm 10.x (`corepack enable` activates the pinned version)
+- Docker with Docker Compose v2
+- `curl` for the HTTP examples
+
+Copy `.env.example` to `.env` only when you need to override the safe local defaults. Never commit `.env` files.
+
+## Quick start: local development
+
+Run PostgreSQL in Docker and the API directly on the host for fast reload:
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+corepack enable
+pnpm install --frozen-lockfile
+pnpm db:up
+pnpm exec prisma migrate deploy
+pnpm db:seed
+pnpm dev
 ```
 
-## Run tests
+The API listens on `http://localhost:3000`. Stop the database with `pnpm db:down`.
+
+## Quick start: interviewer/full stack
+
+The `app` profile builds the production image, starts PostgreSQL, applies migrations, seeds deterministic review data, and waits for both services to become healthy:
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+docker compose --profile app up --build -d --wait
+curl --fail http://localhost:3000/api/v1/health/live
+curl --fail http://localhost:3000/api/v1/health/ready
+curl --fail http://localhost:3000/docs-json
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Open `http://localhost:3000/docs` for Swagger UI. When finished:
 
 ```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+docker compose --profile app down --remove-orphans
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+If the environment cannot pull the required `node:22-alpine` and `postgres:17-alpine` images from Docker Hub, image startup cannot proceed until registry access is restored or the images are already cached. This is an external registry prerequisite, not an application fallback.
 
-## Resources
+## Database migrations and seed data
 
-Check out a few resources that may come in handy when working with NestJS:
+For host development, apply committed migrations and load the idempotent seed:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```bash
+pnpm db:up
+pnpm exec prisma migrate deploy
+pnpm db:seed
+```
 
-## Support
+`prisma migrate deploy` is the reproducible setup path. `pnpm db:migrate` uses the interactive development workflow for authoring a new migration. The seed can be rerun safely and creates one customer and vehicle, one UTC dealership, a 60-minute oil change, two bays, and one qualified technician. Stable identifiers live in `prisma/seed.ts` and are used below.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## API and OpenAPI
 
-## Stay in touch
+- `POST /api/v1/appointments` creates a confirmed appointment.
+- `GET /api/v1/health/live` reports process liveness without querying PostgreSQL.
+- `GET /api/v1/health/ready` verifies database reachability.
+- `GET /docs` serves Swagger UI; `GET /docs-json` serves the OpenAPI document.
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+The client supplies reference IDs and an ISO 8601 start instant. The server selects resources and derives `endTime` from the authoritative service duration. Unknown request properties are rejected. Failures use a stable problem-details contract and do not expose stack traces, Prisma messages, SQL, or environment values.
 
-## License
+## Example booking request
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+The example uses deterministic seed IDs and a UTC time safely in the future for assessment demonstrations:
+
+```bash
+curl --fail-with-body \
+  -H 'content-type: application/json' \
+  -d '{
+    "customerId": "10000000-0000-4000-8000-000000000001",
+    "vehicleId": "20000000-0000-4000-8000-000000000001",
+    "dealershipId": "30000000-0000-4000-8000-000000000001",
+    "serviceTypeId": "40000000-0000-4000-8000-000000000001",
+    "startTime": "2030-01-15T10:00:00.000Z"
+  }' \
+  http://localhost:3000/api/v1/appointments
+```
+
+An identical overlapping request can succeed only when a second complete compatible pair—another free bay and another qualified technician—is available. A conflict is expected after all compatible pairs are occupied. The provided seed has two bays but only one qualified technician, so it has capacity for one appointment at that instant and a second identical request returns `409 Conflict`.
+
+## Testing and verification
+
+The full clean-check command is:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm verify
+docker build .
+docker compose config
+git diff --check
+```
+
+`pnpm verify` runs formatting checks, lint, strict type checking, unit tests, PostgreSQL integration tests, end-to-end tests, and the production build. Integration and end-to-end suites use Testcontainers and therefore require a working Docker daemon; CI uses the hosted runner's Docker daemon rather than a duplicate PostgreSQL service.
+
+Test boundaries are intentional:
+
+- Unit tests cover interval rules, application decisions, controllers, health behavior, and safe failure translation.
+- Integration tests use real PostgreSQL for allocation, locking, rollback, overlap, and competing-request claims.
+- End-to-end tests exercise the public HTTP contract against a real application and PostgreSQL.
+
+## Concurrency guarantees and milestone boundaries
+
+Appointment intervals are UTC half-open intervals `[start, end)`, so back-to-back appointments do not overlap. In one database transaction, the gateway validates relationships, locks compatible bays and technicians in stable ID order, rechecks committed overlaps for the complete interval, chooses the first complete pair deterministically, persists the appointment, and returns only after commit. PostgreSQL-backed tests verify that competing overlapping requests cannot commit the same selected resource.
+
+This is a credible first-milestone guarantee, not the final distributed concurrency contract. PostgreSQL temporal exclusion constraints, idempotency-key replay, bounded retries for retryable transaction failures, and lost-response recovery are deliberately deferred. No in-memory test is used to claim transaction or concurrency safety.
+
+## Assumptions and deliberately deferred work
+
+- Seeded dealership time is UTC and callers submit absolute ISO 8601 instants.
+- Allocation is deterministic first-fit, not an optimization or load-balancing policy.
+- Authentication, authorization, notifications, cancellation, rescheduling, frontend UI, production secret management, and multi-region writes are outside this milestone.
+- Exclusion constraints and idempotency are not implemented and must not be inferred from the locking approach.
+- The database is the authoritative source for duration, ownership, qualification, resource activity, and appointment state.
+
+## AI collaboration narrative
+
+The engineer used AI as a reviewed design and implementation collaborator, not as an authority. The workflow began by framing business invariants and milestone boundaries, then asking AI for alternative designs and tradeoffs. Proposed approaches were challenged for hidden assumptions, race conditions, unsafe failure modes, and unnecessary complexity. Accepted decisions were checked through focused tests, PostgreSQL-backed concurrency scenarios, clean builds, and primary documentation for the relevant tools. AI-produced suggestions and code were reviewed and adapted before acceptance; the engineer retains responsibility for every accepted change and for the final system behavior.
+
+## Project structure
+
+```text
+src/app/                         application composition and bootstrap configuration
+src/common/                      configuration, errors, HTTP correlation
+src/database/                    Prisma lifecycle
+src/health/                      liveness and readiness
+src/modules/appointments/domain  pure interval rules
+src/modules/appointments/application  booking use case and ports
+src/modules/appointments/infrastructure  PostgreSQL allocation adapter
+src/modules/appointments/http    DTOs, controller, and response contract
+prisma/                          schema, committed migration, deterministic seed
+test/integration/                real-PostgreSQL allocation tests
+test/e2e/                        public API tests
+.github/workflows/ci.yml         clean-checkout CI
+```
