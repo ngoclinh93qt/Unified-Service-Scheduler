@@ -1,0 +1,12 @@
+.git
+.github
+.superpowers
+coverage
+dist
+node_modules
+.env
+.env.*
+!.env.example
+*.log
+docs
+test
