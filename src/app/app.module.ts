@@ -6,6 +6,7 @@ import { ProblemDetailsFilter } from '../common/errors/problem-details.filter';
 import { RequestIdMiddleware } from '../common/http/request-id.middleware';
 import { PrismaModule } from '../database/prisma.module';
 import { HealthModule } from '../health/health.module';
+import { AppointmentsModule } from '../modules/appointments/appointments.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { HealthModule } from '../health/health.module';
     }),
     PrismaModule,
     HealthModule,
+    AppointmentsModule,
   ],
   providers: [ProblemDetailsFilter],
 })
