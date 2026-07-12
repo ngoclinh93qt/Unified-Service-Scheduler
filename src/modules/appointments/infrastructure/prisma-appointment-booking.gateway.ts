@@ -12,9 +12,16 @@ import { AppointmentInterval } from '../domain/appointment-interval';
 
 type Candidate = Readonly<{ id: string }>;
 
+export type BookingTransactionHooks = Readonly<{
+  beforeResourcesLocked?: () => Promise<void>;
+}>;
+
 @Injectable()
 export class PrismaAppointmentBookingGateway implements AppointmentBookingGateway {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly hooks: BookingTransactionHooks = {},
+  ) {}
 
   async book(command: CreateAppointmentCommand): Promise<BookedAppointment> {
     return this.prisma.$transaction(async (transaction) => {
@@ -47,24 +54,15 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
         command.startTime,
         serviceType.durationMinutes,
       );
+      await this.hooks.beforeResourcesLocked?.();
       const bays = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
         SELECT b.id
         FROM service_bays b
         WHERE b.dealership_id = ${dealership.id}::uuid
           AND b.active = true
-          AND NOT EXISTS (
-            SELECT 1 FROM appointments a
-            WHERE a.service_bay_id = b.id
-              AND a.start_time < ${interval.end}
-              AND a.end_time > ${interval.start}
-              AND a.status = 'CONFIRMED'
-          )
         ORDER BY b.id
         FOR UPDATE
       `);
-      const serviceBay = bays[0];
-      if (!serviceBay) throw resourcesUnavailable();
-
       const technicians = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
         SELECT t.id
         FROM technicians t
@@ -72,17 +70,23 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
         WHERE t.dealership_id = ${dealership.id}::uuid
           AND t.active = true
           AND q.service_type_id = ${serviceType.id}::uuid
-          AND NOT EXISTS (
-            SELECT 1 FROM appointments a
-            WHERE a.technician_id = t.id
-              AND a.start_time < ${interval.end}
-              AND a.end_time > ${interval.start}
-              AND a.status = 'CONFIRMED'
-          )
         ORDER BY t.id
         FOR UPDATE OF t
       `);
-      const technician = technicians[0];
+
+      const serviceBay = await firstAvailableCandidate(
+        transaction,
+        bays,
+        'serviceBayId',
+        interval,
+      );
+      const technician = await firstAvailableCandidate(
+        transaction,
+        technicians,
+        'technicianId',
+        interval,
+      );
+      if (!serviceBay) throw resourcesUnavailable();
       if (!technician) throw resourcesUnavailable();
 
       const appointment = await transaction.appointment.create({
@@ -100,6 +104,28 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
       return toBookedAppointment(appointment);
     });
   }
+}
+
+async function firstAvailableCandidate(
+  transaction: Prisma.TransactionClient,
+  candidates: Candidate[],
+  resource: 'serviceBayId' | 'technicianId',
+  interval: AppointmentInterval,
+): Promise<Candidate | undefined> {
+  for (const candidate of candidates) {
+    const overlap = await transaction.appointment.findFirst({
+      where: {
+        [resource]: candidate.id,
+        startTime: { lt: interval.end },
+        endTime: { gt: interval.start },
+        status: 'CONFIRMED',
+      },
+      select: { id: true },
+    });
+    if (!overlap) return candidate;
+  }
+
+  return undefined;
 }
 
 function referenceNotFound(reference: string): ApplicationError {

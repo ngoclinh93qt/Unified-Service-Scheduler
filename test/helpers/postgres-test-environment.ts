@@ -42,15 +42,19 @@ export async function startPostgresTestEnvironment(): Promise<PostgresTestEnviro
     throw error;
   }
 
-  let stopped = false;
+  let stopPromise: Promise<void> | undefined;
   return {
     databaseUrl,
     prisma,
     stop: async () => {
-      if (stopped) return;
-      stopped = true;
-      await prisma.$disconnect();
-      await container.stop();
+      stopPromise ??= (async () => {
+        try {
+          await prisma.$disconnect();
+        } finally {
+          await container.stop();
+        }
+      })();
+      await stopPromise;
     },
   };
 }

@@ -31,7 +31,10 @@ describe('PrismaAppointmentBookingGateway', () => {
     gateway = new PrismaAppointmentBookingGateway(prisma);
   });
 
-  afterAll(async () => environment?.stop());
+  afterAll(async () => {
+    await environment?.stop();
+    await environment?.stop();
+  });
 
   beforeEach(async () => {
     await prisma.appointment.deleteMany();
@@ -66,19 +69,35 @@ describe('PrismaAppointmentBookingGateway', () => {
     expect(second.technicianId).toBe(ids.technicianB);
   });
 
-  it('serializes concurrent allocation of the same interval', async () => {
-    const bookings = await Promise.all([
-      gateway.book(commandAt('2026-07-14T08:00:00Z')),
-      gateway.book(commandAt('2026-07-14T08:00:00Z')),
-    ]);
+  it('allocates a single pair to exactly one competing transaction', async () => {
+    await prisma.technicianQualification.delete({
+      where: {
+        technicianId_serviceTypeId: {
+          technicianId: ids.technicianB,
+          serviceTypeId: ids.serviceType,
+        },
+      },
+    });
+    await prisma.technician.delete({ where: { id: ids.technicianB } });
+    await prisma.serviceBay.delete({ where: { id: ids.bayB } });
 
-    expect(new Set(bookings.map((booking) => booking.serviceBayId)).size).toBe(
-      2,
-    );
-    expect(new Set(bookings.map((booking) => booking.technicianId)).size).toBe(
-      2,
-    );
-    await expect(prisma.appointment.count()).resolves.toBe(2);
+    const barrier = twoPartyBarrier();
+    const competingGateway = new PrismaAppointmentBookingGateway(prisma, {
+      beforeResourcesLocked: barrier.arrive,
+    });
+    const first = competingGateway.book(commandAt('2026-07-14T08:00:00Z'));
+    const second = competingGateway.book(commandAt('2026-07-14T08:00:00Z'));
+
+    const results = await Promise.allSettled([first, second]);
+    const fulfilled = results.filter((result) => result.status === 'fulfilled');
+    const rejected = results.filter((result) => result.status === 'rejected');
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: { code: 'RESOURCES_UNAVAILABLE' },
+    });
+    await expect(prisma.appointment.count()).resolves.toBe(1);
   });
 
   it('rolls back and reports unavailable when no full pair exists', async () => {
@@ -160,6 +179,22 @@ describe('PrismaAppointmentBookingGateway', () => {
     ).rejects.toMatchObject({ code: 'RESOURCES_UNAVAILABLE' });
   });
 });
+
+function twoPartyBarrier(): Readonly<{ arrive: () => Promise<void> }> {
+  let arrivals = 0;
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  return {
+    arrive: async () => {
+      arrivals += 1;
+      if (arrivals === 2) release?.();
+      await released;
+    },
+  };
+}
 
 function commandAt(startTime: string): CreateAppointmentCommand {
   return {
