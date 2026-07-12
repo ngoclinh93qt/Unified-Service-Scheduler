@@ -47,8 +47,11 @@ describe('public API (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app?.close();
-    await environment?.stop();
+    try {
+      await app?.close();
+    } finally {
+      await environment?.stop();
+    }
   });
 
   beforeEach(async () => {
@@ -65,9 +68,15 @@ describe('public API (e2e)', () => {
       .expect('x-request-id', 'e2e-request-1')
       .expect((response) => {
         const body = response.body as Record<string, unknown>;
-        expect(body).toMatchObject({ status: 'CONFIRMED', ...validRequest });
-        expect(body.serviceBayId).toEqual(expect.any(String));
-        expect(body.technicianId).toEqual(expect.any(String));
+        expect(typeof body.id).toBe('string');
+        expect(body).toEqual({
+          id: body.id,
+          ...validRequest,
+          serviceBayId: ids.bay,
+          technicianId: ids.technician,
+          endTime: '2026-07-14T09:00:00.000Z',
+          status: 'CONFIRMED',
+        });
       });
   });
 
@@ -77,22 +86,27 @@ describe('public API (e2e)', () => {
       .set('x-request-id', 'validation-request')
       .send({ ...validRequest, unexpected: true })
       .expect(400)
+      .expect('x-request-id', 'validation-request')
       .expect('content-type', /application\/problem\+json/)
       .expect((response) => {
         const body = response.body as Record<string, unknown>;
-        expect(body).toMatchObject({
+        expect(typeof body.timestamp).toBe('string');
+        expect(body).toEqual({
+          type: 'urn:service-scheduler:problem:validation-error',
+          title: 'Bad Request',
           status: 400,
+          detail: 'Bad Request Exception',
           code: 'VALIDATION_ERROR',
-          requestId: 'validation-request',
           instance: '/api/v1/appointments',
-        });
-        expect(body.errors).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
+          timestamp: body.timestamp,
+          requestId: 'validation-request',
+          errors: [
+            {
+              field: 'property',
               message: 'property unexpected should not exist',
-            }),
-          ]),
-        );
+            },
+          ],
+        });
       });
   });
 
@@ -103,6 +117,8 @@ describe('public API (e2e)', () => {
         .send({ ...validRequest, serviceTypeId: ids.missingServiceType }),
       404,
       'REFERENCE_NOT_FOUND',
+      'Not Found',
+      'Service type not found',
     );
   });
 
@@ -113,6 +129,8 @@ describe('public API (e2e)', () => {
         .send({ ...validRequest, customerId: ids.otherCustomer }),
       409,
       'REFERENCE_CONFLICT',
+      'Conflict',
+      'Vehicle does not belong to the customer',
     );
   });
 
@@ -128,6 +146,8 @@ describe('public API (e2e)', () => {
         .send(validRequest),
       409,
       'RESOURCES_UNAVAILABLE',
+      'Conflict',
+      'No service bay and qualified technician are available',
     );
   });
 
@@ -136,15 +156,24 @@ describe('public API (e2e)', () => {
       .spyOn(prisma, '$queryRaw')
       .mockRejectedValueOnce(new Error('offline'));
 
-    await request(app.getHttpServer()).get('/api/v1/health/live').expect(200, {
-      status: 'ok',
-    });
-    await expectProblem(
-      request(app.getHttpServer()).get('/api/v1/health/ready'),
-      503,
-      'SERVICE_UNAVAILABLE',
-    );
-    expect(query).toHaveBeenCalledTimes(1);
+    try {
+      await request(app.getHttpServer())
+        .get('/api/v1/health/live')
+        .expect(200, { status: 'ok' });
+      expect(query).not.toHaveBeenCalled();
+
+      await expectProblem(
+        request(app.getHttpServer()).get('/api/v1/health/ready'),
+        503,
+        'SERVICE_UNAVAILABLE',
+        'Service Unavailable',
+        'Service is not ready',
+        '/api/v1/health/ready',
+      );
+      expect(query).toHaveBeenCalledTimes(1);
+    } finally {
+      query.mockRestore();
+    }
   });
 
   it('publishes the appointment operation in OpenAPI', async () => {
@@ -162,18 +191,29 @@ async function expectProblem(
   pending: request.Test,
   status: number,
   code: string,
+  title: string,
+  detail: string,
+  instance = '/api/v1/appointments',
 ): Promise<void> {
+  const requestId = `e2e-${code.toLowerCase()}`;
   await pending
+    .set('x-request-id', requestId)
     .expect(status)
+    .expect('x-request-id', requestId)
     .expect('content-type', /application\/problem\+json/)
     .expect((response) => {
       const body = response.body as Record<string, unknown>;
-      expect(body).toMatchObject({ status, code });
-      expect(body.type).toBe(
-        `urn:service-scheduler:problem:${code.toLowerCase().replaceAll('_', '-')}`,
-      );
-      expect(body.requestId).toEqual(expect.any(String));
-      expect(body.timestamp).toEqual(expect.any(String));
+      expect(typeof body.timestamp).toBe('string');
+      expect(body).toEqual({
+        type: `urn:service-scheduler:problem:${code.toLowerCase().replaceAll('_', '-')}`,
+        title,
+        status,
+        detail,
+        instance,
+        code,
+        timestamp: body.timestamp,
+        requestId,
+      });
     });
 }
 
