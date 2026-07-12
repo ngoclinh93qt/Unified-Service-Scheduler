@@ -33,7 +33,6 @@ describe('PrismaAppointmentBookingGateway', () => {
 
   afterAll(async () => {
     await environment?.stop();
-    await environment?.stop();
   });
 
   beforeEach(async () => {

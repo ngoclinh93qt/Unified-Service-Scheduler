@@ -1,4 +1,4 @@
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { appConfigValidationSchema } from '../common/config/app.config';
@@ -24,10 +24,6 @@ import { AppointmentsModule } from '../modules/appointments/appointments.module'
     HealthModule,
     AppointmentsModule,
   ],
-  providers: [ProblemDetailsFilter],
+  providers: [ProblemDetailsFilter, RequestIdMiddleware],
 })
-export class AppModule implements NestModule {
-  configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(RequestIdMiddleware).forRoutes('*');
-  }
-}
+export class AppModule {}
