@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Appointment, Prisma } from '@prisma/client';
 
 import { ApplicationError } from '../../../common/errors/application.error';
@@ -20,6 +20,7 @@ export type BookingTransactionHooks = Readonly<{
 export class PrismaAppointmentBookingGateway implements AppointmentBookingGateway {
   constructor(
     private readonly prisma: PrismaService,
+    @Optional()
     private readonly hooks: BookingTransactionHooks = {},
   ) {}
 
