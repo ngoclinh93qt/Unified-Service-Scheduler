@@ -1,0 +1,130 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AppointmentStatus {
+  CONFIRMED
+}
+
+model Customer {
+  id           String        @id @default(uuid()) @db.Uuid
+  name         String
+  email        String        @unique
+  phone        String?
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  vehicles     Vehicle[]     @relation("CustomerVehicles")
+  appointments Appointment[] @relation("CustomerAppointments")
+
+  @@map("customers")
+}
+
+model Vehicle {
+  id           String        @id @default(uuid()) @db.Uuid
+  customerId   String        @map("customer_id") @db.Uuid
+  vin          String
+  make         String
+  model        String
+  year         Int
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  customer     Customer      @relation("CustomerVehicles", fields: [customerId], references: [id])
+  appointments Appointment[] @relation("VehicleAppointments")
+
+  @@unique([customerId, vin])
+  @@map("vehicles")
+}
+
+model Dealership {
+  id           String        @id @default(uuid()) @db.Uuid
+  name         String
+  timezone     String
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  serviceBays  ServiceBay[]  @relation("DealershipServiceBays")
+  technicians  Technician[]  @relation("DealershipTechnicians")
+  appointments Appointment[] @relation("DealershipAppointments")
+
+  @@map("dealerships")
+}
+
+model ServiceType {
+  id              String                      @id @default(uuid()) @db.Uuid
+  name            String                      @unique
+  durationMinutes Int                         @map("duration_minutes")
+  active          Boolean                     @default(true)
+  createdAt       DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  qualifications  TechnicianQualification[]   @relation("ServiceTypeQualifications")
+  appointments    Appointment[]               @relation("ServiceTypeAppointments")
+
+  @@map("service_types")
+}
+
+model ServiceBay {
+  id            String        @id @default(uuid()) @db.Uuid
+  dealershipId  String        @map("dealership_id") @db.Uuid
+  name          String
+  active        Boolean       @default(true)
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  dealership    Dealership    @relation("DealershipServiceBays", fields: [dealershipId], references: [id])
+  appointments  Appointment[] @relation("ServiceBayAppointments")
+
+  @@unique([dealershipId, name])
+  @@map("service_bays")
+}
+
+model Technician {
+  id             String                      @id @default(uuid()) @db.Uuid
+  dealershipId   String                      @map("dealership_id") @db.Uuid
+  name           String
+  active         Boolean                     @default(true)
+  createdAt      DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  dealership     Dealership                  @relation("DealershipTechnicians", fields: [dealershipId], references: [id])
+  qualifications TechnicianQualification[]   @relation("TechnicianQualifications")
+  appointments   Appointment[]               @relation("TechnicianAppointments")
+
+  @@map("technicians")
+}
+
+model TechnicianQualification {
+  technicianId String      @map("technician_id") @db.Uuid
+  serviceTypeId String     @map("service_type_id") @db.Uuid
+  technician   Technician @relation("TechnicianQualifications", fields: [technicianId], references: [id])
+  serviceType  ServiceType @relation("ServiceTypeQualifications", fields: [serviceTypeId], references: [id])
+
+  @@id([technicianId, serviceTypeId])
+  @@map("technician_qualifications")
+}
+
+model Appointment {
+  id            String            @id @default(uuid()) @db.Uuid
+  customerId    String            @map("customer_id") @db.Uuid
+  vehicleId     String            @map("vehicle_id") @db.Uuid
+  dealershipId  String            @map("dealership_id") @db.Uuid
+  serviceTypeId String            @map("service_type_id") @db.Uuid
+  serviceBayId  String            @map("service_bay_id") @db.Uuid
+  technicianId  String            @map("technician_id") @db.Uuid
+  startTime     DateTime          @map("start_time") @db.Timestamptz(3)
+  endTime       DateTime          @map("end_time") @db.Timestamptz(3)
+  status        AppointmentStatus @default(CONFIRMED)
+  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  customer      Customer          @relation("CustomerAppointments", fields: [customerId], references: [id])
+  vehicle       Vehicle           @relation("VehicleAppointments", fields: [vehicleId], references: [id])
+  dealership    Dealership        @relation("DealershipAppointments", fields: [dealershipId], references: [id])
+  serviceType   ServiceType       @relation("ServiceTypeAppointments", fields: [serviceTypeId], references: [id])
+  serviceBay    ServiceBay        @relation("ServiceBayAppointments", fields: [serviceBayId], references: [id])
+  technician    Technician        @relation("TechnicianAppointments", fields: [technicianId], references: [id])
+
+  @@index([dealershipId, startTime, endTime])
+  @@index([serviceBayId, startTime, endTime])
+  @@index([technicianId, startTime, endTime])
+  @@map("appointments")
+}
