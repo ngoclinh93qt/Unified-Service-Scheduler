@@ -1,8 +1,16 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiOperation,
+  ApiExtraModels,
+  ApiServiceUnavailableResponse,
+  ApiTags,
+  getSchemaPath,
+} from '@nestjs/swagger';
+import { ProblemDetailsResponse } from '../common/errors/problem-details.response';
 import { PrismaService } from '../database/prisma.service';
 
 @ApiTags('health')
+@ApiExtraModels(ProblemDetailsResponse)
 @Controller('health')
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}
@@ -15,6 +23,14 @@ export class HealthController {
 
   @Get('ready')
   @ApiOperation({ summary: 'Report database readiness' })
+  @ApiServiceUnavailableResponse({
+    description: 'Database is unavailable',
+    content: {
+      'application/problem+json': {
+        schema: { $ref: getSchemaPath(ProblemDetailsResponse) },
+      },
+    },
+  })
   async ready(): Promise<{ status: 'ok' }> {
     try {
       await this.prisma.$queryRaw`SELECT 1 AS ok`;

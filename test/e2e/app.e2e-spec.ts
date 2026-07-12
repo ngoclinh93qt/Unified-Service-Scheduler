@@ -80,6 +80,32 @@ describe('public API (e2e)', () => {
       });
   });
 
+  it.each(['2026-07-14', '2026-07-14T08:00:00.000'])(
+    'rejects a start time without a UTC designator or offset: %s',
+    async (startTime) => {
+      await request(app.getHttpServer())
+        .post('/api/v1/appointments')
+        .send({ ...validRequest, startTime })
+        .expect(400);
+    },
+  );
+
+  it.each([
+    ['2026-07-14T08:00:00.000Z', '2026-07-14T08:00:00.000Z'],
+    ['2026-07-14T15:00:00.000+07:00', '2026-07-14T08:00:00.000Z'],
+  ])(
+    'accepts an offset-bearing start time and serializes UTC: %s',
+    async (startTime, expectedUtc) => {
+      await request(app.getHttpServer())
+        .post('/api/v1/appointments')
+        .send({ ...validRequest, startTime })
+        .expect(201)
+        .expect((response) => {
+          expect(response.body).toMatchObject({ startTime: expectedUtc });
+        });
+    },
+  );
+
   it('returns problem details for unknown request fields', async () => {
     await request(app.getHttpServer())
       .post('/api/v1/appointments')
@@ -183,6 +209,28 @@ describe('public API (e2e)', () => {
       .expect((response) => {
         const body = response.body as Record<string, unknown>;
         expect(body.paths).toHaveProperty('/api/v1/appointments');
+        type Operation = { responses: Record<string, unknown> };
+        type OpenApiPath = { get?: Operation; post?: Operation };
+        const paths = body.paths as Record<string, OpenApiPath>;
+        const responses = paths['/api/v1/appointments']!.post!.responses;
+        for (const status of ['400', '404', '409', '500']) {
+          const response = responses[status] as {
+            content: Record<string, { schema: unknown }>;
+          };
+          expect(response.content['application/problem+json']!.schema).toEqual({
+            $ref:
+              status === '400'
+                ? '#/components/schemas/ValidationProblemDetailsResponse'
+                : '#/components/schemas/ProblemDetailsResponse',
+          });
+        }
+        const readiness = paths['/api/v1/health/ready']!.get!
+          .responses[503] as {
+          content: Record<string, { schema: unknown }>;
+        };
+        expect(readiness.content['application/problem+json']!.schema).toEqual({
+          $ref: '#/components/schemas/ProblemDetailsResponse',
+        });
       });
   });
 });

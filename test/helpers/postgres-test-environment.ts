@@ -14,18 +14,30 @@ export type PostgresTestEnvironment = Readonly<{
 }>;
 
 export async function startPostgresTestEnvironment(): Promise<PostgresTestEnvironment> {
+  const previousRyukSetting = process.env.TESTCONTAINERS_RYUK_DISABLED;
+  // This local Docker environment cannot start Ryuk. Keep the workaround scoped
+  // to container creation; explicit stop() below remains the cleanup authority.
   process.env.TESTCONTAINERS_RYUK_DISABLED = 'true';
-  const container = await new GenericContainer(
-    process.env.POSTGRES_TEST_IMAGE ?? 'postgres:17-alpine',
-  )
-    .withEnvironment({
-      POSTGRES_DB: 'service_scheduler',
-      POSTGRES_USER: 'scheduler',
-      POSTGRES_PASSWORD: 'scheduler',
-    })
-    .withExposedPorts(5432)
-    .withWaitStrategy(Wait.forListeningPorts())
-    .start();
+  let container: StartedTestContainer;
+  try {
+    container = await new GenericContainer(
+      process.env.POSTGRES_TEST_IMAGE ?? 'postgres:17-alpine',
+    )
+      .withEnvironment({
+        POSTGRES_DB: 'service_scheduler',
+        POSTGRES_USER: 'scheduler',
+        POSTGRES_PASSWORD: 'scheduler',
+      })
+      .withExposedPorts(5432)
+      .withWaitStrategy(Wait.forListeningPorts())
+      .start();
+  } finally {
+    if (previousRyukSetting === undefined) {
+      delete process.env.TESTCONTAINERS_RYUK_DISABLED;
+    } else {
+      process.env.TESTCONTAINERS_RYUK_DISABLED = previousRyukSetting;
+    }
+  }
 
   const databaseUrl = connectionString(container);
   let prisma: PrismaService | undefined;
