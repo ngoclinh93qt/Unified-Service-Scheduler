@@ -126,6 +126,29 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
     `);
     await this.hooks.afterResourcesLocked?.();
 
+    const [timeCheck] = await transaction.$queryRaw<
+      Array<Readonly<{ valid: boolean }>>
+    >(Prisma.sql`
+      SELECT ${command.startTime}::timestamptz > clock_timestamp() AS valid
+    `);
+    if (!timeCheck?.valid) {
+      throw new ApplicationError(
+        'INVALID_APPOINTMENT_TIME',
+        'Appointment start time must be in the future',
+      );
+    }
+
+    const vehicleOverlap = await transaction.appointment.findFirst({
+      where: {
+        vehicleId: vehicle.id,
+        startTime: { lt: interval.end },
+        endTime: { gt: interval.start },
+        status: 'CONFIRMED',
+      },
+      select: { id: true },
+    });
+    if (vehicleOverlap) throw resourcesUnavailable();
+
     const serviceBay = await firstAvailableCandidate(
       transaction,
       bays,
@@ -190,8 +213,10 @@ async function firstAvailableCandidate(
 
 const EXCLUSION_VIOLATION = '23P01';
 // deadlock_detected, lock_not_available, query_canceled (statement timeout),
-// and Prisma's transaction-API timeout.
-const TRANSIENT_CODES = new Set(['40P01', '55P03', '57014', 'P2028']);
+// and Prisma's documented write-conflict/deadlock outcome. P2028 is a generic
+// Transaction API error and must not be treated as retryable wholesale; only
+// its structured interactive-transaction timeout subtype is transient.
+const TRANSIENT_CODES = new Set(['40P01', '55P03', '57014', 'P2034']);
 
 // Prisma driver adapters wrap the PostgreSQL error: the SQLSTATE lives on the
 // `cause` chain (DriverAdapterError -> { kind: 'postgres', code: '23P01' }),
@@ -214,10 +239,39 @@ export function isExclusionViolation(error: unknown): boolean {
 }
 
 export function isTransientFailure(error: unknown): boolean {
-  return causeChainHasCode(
-    error,
-    (code) => typeof code === 'string' && TRANSIENT_CODES.has(code),
+  return (
+    causeChainHasCode(
+      error,
+      (code) => typeof code === 'string' && TRANSIENT_CODES.has(code),
+    ) || causeChainHasStructuredTransactionTimeout(error)
   );
+}
+
+function causeChainHasStructuredTransactionTimeout(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== 'object' || current === null) return false;
+    const candidate = current as {
+      code?: unknown;
+      meta?: { timeout?: unknown; timeTaken?: unknown };
+      cause?: unknown;
+    };
+    const timeout = candidate.meta?.timeout;
+    const timeTaken = candidate.meta?.timeTaken;
+    if (
+      candidate.code === 'P2028' &&
+      typeof timeout === 'number' &&
+      Number.isFinite(timeout) &&
+      timeout > 0 &&
+      typeof timeTaken === 'number' &&
+      Number.isFinite(timeTaken) &&
+      timeTaken >= timeout
+    ) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 function referenceNotFound(reference: string): ApplicationError {
@@ -227,7 +281,7 @@ function referenceNotFound(reference: string): ApplicationError {
 function resourcesUnavailable(): ApplicationError {
   return new ApplicationError(
     'RESOURCES_UNAVAILABLE',
-    'No service bay and qualified technician are available',
+    'The vehicle or required service resources are unavailable for the requested time',
   );
 }
 

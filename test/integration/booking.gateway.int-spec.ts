@@ -4,6 +4,7 @@ import { PrismaService } from '../../src/database/prisma.service';
 import { CreateAppointmentCommand } from '../../src/modules/appointments/application/booking.types';
 import {
   isExclusionViolation,
+  isTransientFailure,
   PrismaAppointmentBookingGateway,
 } from '../../src/modules/appointments/infrastructure/prisma-appointment-booking.gateway';
 import {
@@ -15,6 +16,8 @@ const ids = {
   customer: '10000000-0000-4000-8000-000000000001',
   otherCustomer: '10000000-0000-4000-8000-000000000002',
   vehicle: '20000000-0000-4000-8000-000000000001',
+  otherVehicle: '20000000-0000-4000-8000-000000000002',
+  thirdVehicle: '20000000-0000-4000-8000-000000000003',
   dealership: '30000000-0000-4000-8000-000000000001',
   otherDealership: '30000000-0000-4000-8000-000000000002',
   serviceType: '40000000-0000-4000-8000-000000000001',
@@ -53,24 +56,42 @@ describe('PrismaAppointmentBookingGateway', () => {
   });
 
   it('selects the first free bay and first qualified technician by id', async () => {
-    const result = await gateway.book(commandAt('2026-07-14T08:00:00Z'));
+    const result = await gateway.book(commandAt('2099-07-14T08:00:00Z'));
     expect(result.serviceBayId).toBe(ids.bayA);
     expect(result.technicianId).toBe(ids.technicianA);
     await expect(prisma.appointment.count()).resolves.toBe(1);
   });
 
   it('allows a booking that starts exactly when another ends', async () => {
-    await gateway.book(commandAt('2026-07-14T08:00:00Z'));
+    await gateway.book(commandAt('2099-07-14T08:00:00Z'));
     await expect(
-      gateway.book(commandAt('2026-07-14T09:00:00Z')),
-    ).resolves.toMatchObject({ startTime: new Date('2026-07-14T09:00:00Z') });
+      gateway.book(commandAt('2099-07-14T09:00:00Z')),
+    ).resolves.toMatchObject({ startTime: new Date('2099-07-14T09:00:00Z') });
   });
 
   it('uses another pair when the first pair overlaps', async () => {
-    await gateway.book(commandAt('2026-07-14T08:00:00Z'));
-    const second = await gateway.book(commandAt('2026-07-14T08:30:00Z'));
+    await gateway.book(commandAt('2099-07-14T08:00:00Z'));
+    const second = await gateway.book(
+      commandForVehicle('2099-07-14T08:30:00Z', ids.otherVehicle),
+    );
     expect(second.serviceBayId).toBe(ids.bayB);
     expect(second.technicianId).toBe(ids.technicianB);
+  });
+
+  it('rejects an overlapping appointment for the same vehicle', async () => {
+    await gateway.book(commandAt('2099-07-14T08:00:00Z'));
+
+    await expect(
+      gateway.book(commandAt('2099-07-14T08:30:00Z')),
+    ).rejects.toMatchObject({ code: 'RESOURCES_UNAVAILABLE' });
+    await expect(prisma.appointment.count()).resolves.toBe(1);
+  });
+
+  it('rejects an elapsed start time inside the authoritative transaction', async () => {
+    await expect(
+      gateway.book(commandAt(new Date(Date.now() - 1_000).toISOString())),
+    ).rejects.toMatchObject({ code: 'INVALID_APPOINTMENT_TIME' });
+    await expect(prisma.appointment.count()).resolves.toBe(0);
   });
 
   it('allocates a single pair to exactly one competing transaction', async () => {
@@ -89,8 +110,8 @@ describe('PrismaAppointmentBookingGateway', () => {
     const competingGateway = new PrismaAppointmentBookingGateway(prisma, {
       beforeResourcesLocked: barrier.arrive,
     });
-    const first = competingGateway.book(commandAt('2026-07-14T08:00:00Z'));
-    const second = competingGateway.book(commandAt('2026-07-14T08:00:00Z'));
+    const first = competingGateway.book(commandAt('2099-07-14T08:00:00Z'));
+    const second = competingGateway.book(commandAt('2099-07-14T08:00:00Z'));
 
     const results = await Promise.allSettled([first, second]);
     const fulfilled = results.filter((result) => result.status === 'fulfilled');
@@ -104,11 +125,35 @@ describe('PrismaAppointmentBookingGateway', () => {
     await expect(prisma.appointment.count()).resolves.toBe(1);
   });
 
+  it('rechecks after contention and allocates two vehicles to distinct pairs', async () => {
+    const barrier = twoPartyBarrier();
+    const competingGateway = new PrismaAppointmentBookingGateway(prisma, {
+      beforeResourcesLocked: barrier.arrive,
+    });
+
+    const [first, second] = await Promise.all([
+      competingGateway.book(commandAt('2099-07-14T08:00:00Z')),
+      competingGateway.book(
+        commandForVehicle('2099-07-14T08:00:00Z', ids.otherVehicle),
+      ),
+    ]);
+
+    expect([first.serviceBayId, second.serviceBayId].sort()).toEqual(
+      [ids.bayA, ids.bayB].sort(),
+    );
+    expect([first.technicianId, second.technicianId].sort()).toEqual(
+      [ids.technicianA, ids.technicianB].sort(),
+    );
+    await expect(prisma.appointment.count()).resolves.toBe(2);
+  });
+
   it('rolls back and reports unavailable when no full pair exists', async () => {
-    await gateway.book(commandAt('2026-07-14T08:00:00Z'));
-    await gateway.book(commandAt('2026-07-14T08:00:00Z'));
+    await gateway.book(commandAt('2099-07-14T08:00:00Z'));
+    await gateway.book(
+      commandForVehicle('2099-07-14T08:00:00Z', ids.otherVehicle),
+    );
     await expect(
-      gateway.book(commandAt('2026-07-14T08:30:00Z')),
+      gateway.book(commandForVehicle('2099-07-14T08:30:00Z', ids.thirdVehicle)),
     ).rejects.toMatchObject({
       code: 'RESOURCES_UNAVAILABLE',
     });
@@ -118,7 +163,7 @@ describe('PrismaAppointmentBookingGateway', () => {
   it('reports a missing service type before allocation', async () => {
     await expect(
       gateway.book({
-        ...commandAt('2026-07-14T08:00:00Z'),
+        ...commandAt('2099-07-14T08:00:00Z'),
         serviceTypeId: ids.otherServiceType,
       }),
     ).rejects.toMatchObject({ code: 'REFERENCE_NOT_FOUND' });
@@ -134,7 +179,7 @@ describe('PrismaAppointmentBookingGateway', () => {
     });
     await expect(
       gateway.book({
-        ...commandAt('2026-07-14T08:00:00Z'),
+        ...commandAt('2099-07-14T08:00:00Z'),
         customerId: ids.otherCustomer,
       }),
     ).rejects.toMatchObject({ code: 'REFERENCE_CONFLICT' });
@@ -156,7 +201,7 @@ describe('PrismaAppointmentBookingGateway', () => {
   ])('does not allocate an inactive %s', async (_label, deactivate) => {
     await deactivate();
     await expect(
-      gateway.book(commandAt('2026-07-14T08:00:00Z')),
+      gateway.book(commandAt('2099-07-14T08:00:00Z')),
     ).rejects.toMatchObject({
       code: 'RESOURCES_UNAVAILABLE',
     });
@@ -165,7 +210,7 @@ describe('PrismaAppointmentBookingGateway', () => {
   it('does not allocate a technician without the requested qualification', async () => {
     await prisma.technicianQualification.deleteMany();
     await expect(
-      gateway.book(commandAt('2026-07-14T08:00:00Z')),
+      gateway.book(commandAt('2099-07-14T08:00:00Z')),
     ).rejects.toMatchObject({
       code: 'RESOURCES_UNAVAILABLE',
     });
@@ -177,7 +222,7 @@ describe('PrismaAppointmentBookingGateway', () => {
     });
     await expect(
       gateway.book({
-        ...commandAt('2026-07-14T08:00:00Z'),
+        ...commandAt('2099-07-14T08:00:00Z'),
         dealershipId: ids.otherDealership,
       }),
     ).rejects.toMatchObject({ code: 'RESOURCES_UNAVAILABLE' });
@@ -187,6 +232,7 @@ describe('PrismaAppointmentBookingGateway', () => {
     [
       'service bay',
       (first: { serviceBayId: string }) => ({
+        vehicleId: ids.otherVehicle,
         serviceBayId: first.serviceBayId,
         technicianId: ids.technicianB,
       }),
@@ -194,14 +240,23 @@ describe('PrismaAppointmentBookingGateway', () => {
     [
       'technician',
       (first: { technicianId: string }) => ({
+        vehicleId: ids.otherVehicle,
         serviceBayId: ids.bayB,
         technicianId: first.technicianId,
+      }),
+    ],
+    [
+      'vehicle',
+      () => ({
+        vehicleId: ids.vehicle,
+        serviceBayId: ids.bayB,
+        technicianId: ids.technicianB,
       }),
     ],
   ])(
     'rejects an overlapping %s reservation at the database level',
     async (_label, conflictingAssignment) => {
-      const first = await gateway.book(commandAt('2026-07-14T08:00:00Z'));
+      const first = await gateway.book(commandAt('2099-07-14T08:00:00Z'));
 
       // Bypass the application guard entirely: a direct insert of an
       // overlapping confirmed appointment must be refused by the exclusion
@@ -210,12 +265,11 @@ describe('PrismaAppointmentBookingGateway', () => {
         .create({
           data: {
             customerId: ids.customer,
-            vehicleId: ids.vehicle,
             dealershipId: ids.dealership,
             serviceTypeId: ids.serviceType,
             ...conflictingAssignment(first),
-            startTime: new Date('2026-07-14T08:30:00Z'),
-            endTime: new Date('2026-07-14T09:30:00Z'),
+            startTime: new Date('2099-07-14T08:30:00Z'),
+            endTime: new Date('2099-07-14T09:30:00Z'),
           },
         })
         .then(
@@ -280,12 +334,13 @@ describe('PrismaAppointmentBookingGateway', () => {
       });
 
       await expect(
-        lockedGateway.book(commandAt('2026-07-14T08:00:00Z')),
+        lockedGateway.book(commandAt('2099-07-14T08:00:00Z')),
       ).resolves.toMatchObject({
         customerId: ids.customer,
-        endTime: new Date('2026-07-14T09:00:00Z'),
+        endTime: new Date('2099-07-14T09:00:00Z'),
       });
-      expect(mutationError).toBeDefined();
+      expect(isTransientFailure(mutationError)).toBe(true);
+      await expect(prisma.$transaction(mutate)).resolves.toBeUndefined();
     },
   );
 
@@ -316,18 +371,77 @@ describe('PrismaAppointmentBookingGateway', () => {
     });
 
     await expect(
-      lockedGateway.book(commandAt('2026-07-14T08:00:00Z')),
+      lockedGateway.book(commandAt('2099-07-14T08:00:00Z')),
     ).resolves.toMatchObject({ technicianId: ids.technicianA });
-    expect(revocationError).toBeDefined();
+    expect(isTransientFailure(revocationError)).toBe(true);
     await expect(
       prisma.technicianQualification.count({
         where: { technicianId: ids.technicianA },
       }),
     ).resolves.toBe(1);
+    await expect(
+      prisma.technicianQualification.delete({
+        where: {
+          technicianId_serviceTypeId: {
+            technicianId: ids.technicianA,
+            serviceTypeId: ids.serviceType,
+          },
+        },
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      prisma.technicianQualification.count({
+        where: { technicianId: ids.technicianA },
+      }),
+    ).resolves.toBe(0);
+  });
+
+  it('recognizes the real adapter error shape for a PostgreSQL lock timeout', async () => {
+    let caught: unknown;
+
+    await prisma.$transaction(async (holder) => {
+      await holder.serviceBay.update({
+        where: { id: ids.bayA },
+        data: { name: 'Bay A held' },
+      });
+      caught = await prisma
+        .$transaction(async (competing) => {
+          await competing.$executeRaw`SET LOCAL lock_timeout = '100ms'`;
+          await competing.serviceBay.update({
+            where: { id: ids.bayA },
+            data: { name: 'Bay A blocked' },
+          });
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+    });
+
+    expect(caught).toBeDefined();
+    expect(isTransientFailure(caught)).toBe(true);
+  });
+
+  it('recognizes the real Prisma interactive-transaction timeout shape', async () => {
+    const caught = await prisma
+      .$transaction(
+        async (transaction) => {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          await transaction.serviceBay.count();
+        },
+        { maxWait: 1_000, timeout: 100 },
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(caught).toBeDefined();
+    expect(isTransientFailure(caught)).toBe(true);
   });
 
   it('reads a booked appointment back by id and returns null when absent', async () => {
-    const booked = await gateway.book(commandAt('2026-07-14T08:00:00Z'));
+    const booked = await gateway.book(commandAt('2099-07-14T08:00:00Z'));
     await expect(gateway.findById(booked.id)).resolves.toMatchObject({
       id: booked.id,
       serviceBayId: booked.serviceBayId,
@@ -355,9 +469,16 @@ function twoPartyBarrier(): Readonly<{ arrive: () => Promise<void> }> {
 }
 
 function commandAt(startTime: string): CreateAppointmentCommand {
+  return commandForVehicle(startTime, ids.vehicle);
+}
+
+function commandForVehicle(
+  startTime: string,
+  vehicleId: string,
+): CreateAppointmentCommand {
   return {
     customerId: ids.customer,
-    vehicleId: ids.vehicle,
+    vehicleId,
     dealershipId: ids.dealership,
     serviceTypeId: ids.serviceType,
     startTime: new Date(startTime),
@@ -376,6 +497,26 @@ async function seedAvailablePair(prisma: PrismaService): Promise<void> {
       make: 'Honda',
       model: 'Civic',
       year: 2024,
+    },
+  });
+  await prisma.vehicle.create({
+    data: {
+      id: ids.thirdVehicle,
+      customerId: ids.customer,
+      vin: 'VIN-3',
+      make: 'Toyota',
+      model: 'Camry',
+      year: 2025,
+    },
+  });
+  await prisma.vehicle.create({
+    data: {
+      id: ids.otherVehicle,
+      customerId: ids.customer,
+      vin: 'VIN-2',
+      make: 'Honda',
+      model: 'Accord',
+      year: 2025,
     },
   });
   await prisma.dealership.create({

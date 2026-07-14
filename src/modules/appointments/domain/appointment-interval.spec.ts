@@ -15,37 +15,6 @@ describe('AppointmentInterval', () => {
     expect(interval.end.toISOString()).toBe('2026-07-13T09:00:00.000Z');
   });
 
-  it('detects partially overlapping intervals', () => {
-    const first = AppointmentInterval.create(at('2026-07-13T08:00:00Z'), 60);
-    const second = AppointmentInterval.create(at('2026-07-13T08:30:00Z'), 60);
-
-    expect(first.overlaps(second)).toBe(true);
-    expect(second.overlaps(first)).toBe(true);
-  });
-
-  it('detects an interval contained within another', () => {
-    const outer = AppointmentInterval.create(at('2026-07-13T08:00:00Z'), 120);
-    const inner = AppointmentInterval.create(at('2026-07-13T08:30:00Z'), 30);
-
-    expect(outer.overlaps(inner)).toBe(true);
-    expect(inner.overlaps(outer)).toBe(true);
-  });
-
-  it('treats touching half-open intervals as non-overlapping', () => {
-    const first = AppointmentInterval.create(at('2026-07-13T08:00:00Z'), 60);
-    const second = AppointmentInterval.create(at('2026-07-13T09:00:00Z'), 30);
-
-    expect(first.overlaps(second)).toBe(false);
-    expect(second.overlaps(first)).toBe(false);
-  });
-
-  it('treats separated intervals as non-overlapping', () => {
-    const first = AppointmentInterval.create(at('2026-07-13T08:00:00Z'), 30);
-    const second = AppointmentInterval.create(at('2026-07-13T09:00:00Z'), 30);
-
-    expect(first.overlaps(second)).toBe(false);
-  });
-
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
     'rejects duration %p',
     (duration) => {

@@ -69,7 +69,7 @@ describe('ProblemDetailsFilter', () => {
     );
   });
 
-  it('sanitizes and logs unexpected failures with the request ID and stack', () => {
+  it('sanitizes unexpected failures in both the response and logs', () => {
     const failure = new Error('database password leaked');
 
     filter.catch(failure, host);
@@ -82,11 +82,13 @@ describe('ProblemDetailsFilter', () => {
       }),
     );
     expect(send.mock.calls[0]?.[0].detail).not.toContain('password');
-    expect(logError.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({
-        requestId: 'request-123',
-        stack: failure.stack,
-      }),
-    );
+    const logged = logError.mock.calls[0]?.[0];
+    expect(logged).toEqual({
+      requestId: 'request-123',
+      errorType: 'Error',
+    });
+    expect(logged).not.toHaveProperty('error');
+    expect(logged).not.toHaveProperty('message');
+    expect(logged).not.toHaveProperty('stack');
   });
 });

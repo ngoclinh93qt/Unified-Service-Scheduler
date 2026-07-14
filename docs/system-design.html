@@ -1682,9 +1682,10 @@ Location: /api/v1/appointments/{id}
                   <td>503 · <code>TRANSIENT_FAILURE</code></td>
                   <td>
                     A proven PostgreSQL deadlock, lock timeout or statement
-                    cancellation, or Prisma <code>P2034</code>; the command
-                    itself is valid. Generic <code>P2028</code> errors are not
-                    classified wholesale as retryable.
+                    cancellation, Prisma <code>P2034</code>, or a structured
+                    Prisma interactive-transaction timeout; the command itself
+                    is valid. Generic <code>P2028</code> errors without numeric
+                    timeout metadata are not classified as retryable.
                   </td>
                   <td>
                     Client may retry after the <code>Retry-After</code> hint.
@@ -1723,10 +1724,10 @@ Location: /api/v1/appointments/{id}
               </thead>
               <tbody>
                 <tr>
-                  <td>Interval boundaries</td>
+                  <td>Interval construction</td>
                   <td>
-                    Containment and partial overlap conflict; touching intervals
-                    do not.
+                    Valid start and duration derive a protected UTC end instant;
+                    malformed inputs are rejected.
                   </td>
                   <td>Pure unit tests</td>
                 </tr>
@@ -1754,13 +1755,14 @@ Location: /api/v1/appointments/{id}
                   <td>Testcontainers (gateway barrier)</td>
                 </tr>
                 <tr>
-                  <td>Second-pair allocation</td>
+                  <td>Concurrent second-pair allocation</td>
                   <td>
-                    A different vehicle with an overlapping booking falls
-                    through to the next free bay and technician. The same
+                    Two different vehicles contend at the same instant, then
+                    both commit on distinct complete pairs after the waiting
+                    transaction rechecks committed availability. The same
                     vehicle is rejected independently of spare resources.
                   </td>
-                  <td>Testcontainers</td>
+                  <td>Testcontainers (gateway barrier)</td>
                 </tr>
                 <tr>
                   <td>Blocked concurrent mutation</td>
@@ -1775,14 +1777,26 @@ Location: /api/v1/appointments/{id}
                   <td>Driver error contract</td>
                   <td>
                     The real adapter error shapes for exclusion violations
-                    (<code>23P01</code>) and lock timeouts are recognized by the
-                    failure classification, not assumed.
+                    (<code>23P01</code>), lock timeouts and Prisma interactive-
+                    transaction timeouts are recognized by the failure
+                    classification, not assumed.
                   </td>
                   <td>Real PostgreSQL</td>
                 </tr>
               </tbody>
             </table>
           </div>
+          <h3>Assessment runtime</h3>
+          <p>
+            Compose applies committed migrations and reruns an idempotent seed
+            at startup, but does not delete appointments by default; retained
+            PostgreSQL volumes therefore survive app restarts. Resetting the
+            deterministic demo vehicle is an explicit assessment command. The
+            built runtime image also contains the pinned pnpm version, so its
+            entrypoint does not depend on npm registry access after the image
+            has been built. Production would still separate migrations and demo
+            seeding from application startup.
+          </p>
           <h3>Observability</h3>
           <p>
             Structured JSON logging with request correlation is implemented. The
@@ -1875,11 +1889,13 @@ Location: /api/v1/appointments/{id}
                   </td>
                   <td>
                     Retry semantics are limited to known SQLSTATEs and Prisma
-                    <code>P2034</code>.
+                    <code>P2034</code>, plus the structured <code>P2028</code>
+                    interactive-transaction timeout subtype with numeric timeout
+                    metadata.
                   </td>
                   <td>
-                    Classifier unit tests and a real lock-timeout integration
-                    test.
+                    Classifier unit tests plus real lock-timeout and
+                    transaction- timeout integration tests.
                   </td>
                 </tr>
                 <tr>

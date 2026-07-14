@@ -124,6 +124,7 @@ model Appointment {
   technician    Technician        @relation("TechnicianAppointments", fields: [technicianId], references: [id])
 
   @@index([dealershipId, startTime, endTime])
+  @@index([vehicleId, startTime, endTime])
   @@index([serviceBayId, startTime, endTime])
   @@index([technicianId, startTime, endTime])
   @@map("appointments")

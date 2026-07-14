@@ -51,12 +51,11 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       !(exception instanceof HttpException) &&
       !(exception instanceof ApplicationError)
     ) {
-      const error = exception instanceof Error ? exception : undefined;
       this.logger.error(
         {
           requestId: problem.requestId,
-          stack: error?.stack,
-          error: error?.message ?? String(exception),
+          errorType:
+            exception instanceof Error ? exception.name : typeof exception,
         },
         'Unexpected request failure',
       );

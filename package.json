@@ -28,7 +28,7 @@
     "db:up": "docker compose up -d --wait postgres",
     "db:down": "docker compose down --remove-orphans",
     "db:migrate": "prisma migrate dev",
-    "db:seed": "prisma db seed",
+    "db:seed": "prisma generate && prisma db seed",
     "db:studio": "prisma studio",
     "prisma:generate": "prisma generate"
   },

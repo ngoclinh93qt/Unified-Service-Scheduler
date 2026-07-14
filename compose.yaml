@@ -23,6 +23,7 @@ services:
       DATABASE_URL: postgresql://scheduler:scheduler@postgres:5432/service_scheduler
       NODE_ENV: production
       PORT: 3000
+      RESET_DEMO_APPOINTMENTS: '${RESET_DEMO_APPOINTMENTS:-false}'
     ports:
       - '${PORT:-3000}:3000'
     depends_on:

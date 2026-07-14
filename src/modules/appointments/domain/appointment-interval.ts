@@ -44,11 +44,4 @@ export class AppointmentInterval {
   get end(): Date {
     return new Date(this.endTimestamp);
   }
-
-  overlaps(other: AppointmentInterval): boolean {
-    return (
-      this.startTimestamp < other.endTimestamp &&
-      other.startTimestamp < this.endTimestamp
-    );
-  }
 }

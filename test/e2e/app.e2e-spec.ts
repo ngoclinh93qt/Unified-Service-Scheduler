@@ -28,7 +28,7 @@ const validRequest = {
   vehicleId: ids.vehicle,
   dealershipId: ids.dealership,
   serviceTypeId: ids.serviceType,
-  startTime: '2026-07-14T08:00:00.000Z',
+  startTime: '2099-07-14T08:00:00.000Z',
 };
 
 describe('public API (e2e)', () => {
@@ -44,7 +44,7 @@ describe('public API (e2e)', () => {
       // Freeze time so past-time validation is deterministic and the seeded
       // request instants stay in the future regardless of the wall clock.
       .overrideProvider(CLOCK)
-      .useValue(() => new Date('2026-07-14T00:00:00.000Z'))
+      .useValue(() => new Date('2099-07-14T00:00:00.000Z'))
       .compile();
     app = module.createNestApplication();
     configureApp(app);
@@ -83,7 +83,7 @@ describe('public API (e2e)', () => {
           ...validRequest,
           serviceBayId: ids.bay,
           technicianId: ids.technician,
-          endTime: '2026-07-14T09:00:00.000Z',
+          endTime: '2099-07-14T09:00:00.000Z',
           status: 'CONFIRMED',
         });
       });
@@ -133,7 +133,7 @@ describe('public API (e2e)', () => {
   it('rejects a start time in the past with 400', async () => {
     await request(app.getHttpServer())
       .post('/api/v1/appointments')
-      .send({ ...validRequest, startTime: '2026-07-13T08:00:00.000Z' })
+      .send({ ...validRequest, startTime: '2099-07-13T08:00:00.000Z' })
       .expect(400)
       .expect('content-type', /application\/problem\+json/)
       .expect((response) => {
@@ -143,7 +143,7 @@ describe('public API (e2e)', () => {
       });
   });
 
-  it.each(['2026-07-14', '2026-07-14T08:00:00.000'])(
+  it.each(['2099-07-14', '2099-07-14T08:00:00.000'])(
     'rejects a start time without a UTC designator or offset: %s',
     async (startTime) => {
       await request(app.getHttpServer())
@@ -154,8 +154,8 @@ describe('public API (e2e)', () => {
   );
 
   it.each([
-    ['2026-07-14T08:00:00.000Z', '2026-07-14T08:00:00.000Z'],
-    ['2026-07-14T15:00:00.000+07:00', '2026-07-14T08:00:00.000Z'],
+    ['2099-07-14T08:00:00.000Z', '2099-07-14T08:00:00.000Z'],
+    ['2099-07-14T15:00:00.000+07:00', '2099-07-14T08:00:00.000Z'],
   ])(
     'accepts an offset-bearing start time and serializes UTC: %s',
     async (startTime, expectedUtc) => {
@@ -236,7 +236,7 @@ describe('public API (e2e)', () => {
       409,
       'RESOURCES_UNAVAILABLE',
       'Conflict',
-      'No service bay and qualified technician are available',
+      'The vehicle or required service resources are unavailable for the requested time',
     );
   });
 
