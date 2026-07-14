@@ -26,9 +26,11 @@ export type ProblemDetails = {
 type RequestWithId = Request & { requestId?: string };
 
 const applicationStatuses: Record<ApplicationErrorCode, number> = {
+  INVALID_APPOINTMENT_TIME: HttpStatus.BAD_REQUEST,
   REFERENCE_NOT_FOUND: HttpStatus.NOT_FOUND,
   REFERENCE_CONFLICT: HttpStatus.CONFLICT,
   RESOURCES_UNAVAILABLE: HttpStatus.CONFLICT,
+  TRANSIENT_FAILURE: HttpStatus.SERVICE_UNAVAILABLE,
 };
 
 @Injectable()
@@ -58,6 +60,12 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         },
         'Unexpected request failure',
       );
+    }
+
+    if (problem.code === 'TRANSIENT_FAILURE') {
+      // The command may succeed on retry once the contention clears; internal
+      // retry is deferred, so surface the hint to the client instead.
+      response.setHeader('Retry-After', '1');
     }
 
     response
@@ -93,7 +101,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         ? {
             ...problem,
             errors: messages.map((message) => ({
-              field: message.split(' ', 1)[0] ?? '',
+              field: fieldFromValidationMessage(message),
               message,
             })),
           }
@@ -153,4 +161,11 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       .replaceAll(/[^A-Z0-9]+/g, '_')
       .replaceAll(/^_|_$/g, '');
   }
+}
+
+// class-validator messages lead with the property name, except whitelist
+// violations which are phrased "property <name> should not exist".
+function fieldFromValidationMessage(message: string): string {
+  const words = message.split(' ');
+  return (words[0] === 'property' ? words[1] : words[0]) ?? '';
 }

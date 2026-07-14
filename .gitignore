@@ -6,3 +6,5 @@ coverage/
 !.env.example
 .DS_Store
 tmp/
+.superpowers/
+docs/superpowers/

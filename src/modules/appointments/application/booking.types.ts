@@ -21,6 +21,7 @@ export type BookedAppointment = Readonly<{
 
 export interface AppointmentBookingGateway {
   book(command: CreateAppointmentCommand): Promise<BookedAppointment>;
+  findById(id: string): Promise<BookedAppointment | null>;
 }
 
 export const APPOINTMENT_BOOKING_GATEWAY = Symbol(

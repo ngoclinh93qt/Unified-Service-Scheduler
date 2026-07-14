@@ -1,4 +1,7 @@
+import { Response } from 'express';
+
 import { CreateAppointmentUseCase } from '../application/create-appointment.use-case';
+import { GetAppointmentUseCase } from '../application/get-appointment.use-case';
 import { AppointmentsController } from './appointments.controller';
 import { CreateAppointmentDto } from './create-appointment.dto';
 
@@ -23,15 +26,36 @@ describe('AppointmentsController', () => {
     status: 'CONFIRMED' as const,
   };
   const execute = jest.fn();
-  const useCase = { execute } as unknown as CreateAppointmentUseCase;
-  const controller = new AppointmentsController(useCase);
+  const findOne = jest.fn();
+  const createUseCase = { execute } as unknown as CreateAppointmentUseCase;
+  const getUseCase = {
+    execute: findOne,
+  } as unknown as GetAppointmentUseCase;
+  const controller = new AppointmentsController(createUseCase, getUseCase);
 
-  beforeEach(() => execute.mockReset());
+  function fakeResponse(): {
+    response: Response;
+    headers: Record<string, string>;
+  } {
+    const headers: Record<string, string> = {};
+    const response = {
+      setHeader: (name: string, value: string) => {
+        headers[name] = value;
+      },
+    } as unknown as Response;
+    return { response, headers };
+  }
 
-  it('parses the ISO instant and returns the stable response shape', async () => {
+  beforeEach(() => {
+    execute.mockReset();
+    findOne.mockReset();
+  });
+
+  it('parses the ISO instant, sets Location, and returns the stable shape', async () => {
     execute.mockResolvedValue(bookedAppointment);
+    const { response, headers } = fakeResponse();
 
-    await expect(controller.create(dto)).resolves.toEqual({
+    await expect(controller.create(dto, response)).resolves.toEqual({
       ...bookedAppointment,
       startTime: '2026-07-14T08:00:00.000Z',
       endTime: '2026-07-14T09:00:00.000Z',
@@ -40,5 +64,19 @@ describe('AppointmentsController', () => {
       ...ids,
       startTime: new Date('2026-07-14T08:00:00.000Z'),
     });
+    expect(headers.Location).toBe(
+      '/api/v1/appointments/70000000-0000-4000-8000-000000000001',
+    );
+  });
+
+  it('returns the stable response shape for a read by id', async () => {
+    findOne.mockResolvedValue(bookedAppointment);
+
+    await expect(controller.findOne(bookedAppointment.id)).resolves.toEqual({
+      ...bookedAppointment,
+      startTime: '2026-07-14T08:00:00.000Z',
+      endTime: '2026-07-14T09:00:00.000Z',
+    });
+    expect(findOne).toHaveBeenCalledWith(bookedAppointment.id);
   });
 });

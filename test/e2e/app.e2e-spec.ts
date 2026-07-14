@@ -6,6 +6,7 @@ import { App } from 'supertest/types';
 import { AppModule } from '../../src/app/app.module';
 import { configureApp } from '../../src/app/configure-app';
 import { PrismaService } from '../../src/database/prisma.service';
+import { CLOCK } from '../../src/modules/appointments/application/clock';
 import {
   PostgresTestEnvironment,
   startPostgresTestEnvironment,
@@ -39,7 +40,12 @@ describe('public API (e2e)', () => {
     environment = await startPostgresTestEnvironment();
     const module = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      // Freeze time so past-time validation is deterministic and the seeded
+      // request instants stay in the future regardless of the wall clock.
+      .overrideProvider(CLOCK)
+      .useValue(() => new Date('2026-07-14T00:00:00.000Z'))
+      .compile();
     app = module.createNestApplication();
     configureApp(app);
     await app.init();
@@ -69,6 +75,9 @@ describe('public API (e2e)', () => {
       .expect((response) => {
         const body = response.body as Record<string, unknown>;
         expect(typeof body.id).toBe('string');
+        expect(response.headers.location).toBe(
+          `/api/v1/appointments/${String(body.id)}`,
+        );
         expect(body).toEqual({
           id: body.id,
           ...validRequest,
@@ -76,6 +85,60 @@ describe('public API (e2e)', () => {
           technicianId: ids.technician,
           endTime: '2026-07-14T09:00:00.000Z',
           status: 'CONFIRMED',
+        });
+      });
+  });
+
+  it('reads a created appointment back by id', async () => {
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/appointments')
+      .send(validRequest)
+      .expect(201);
+    const id = (created.body as { id: string }).id;
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/appointments/${id}`)
+      .expect(200)
+      .expect((response) => {
+        expect(response.body).toEqual(created.body);
+      });
+  });
+
+  it('returns 404 problem details for an unknown appointment id', async () => {
+    await expectProblem(
+      request(app.getHttpServer()).get(
+        '/api/v1/appointments/70000000-0000-4000-8000-0000000000ff',
+      ),
+      404,
+      'REFERENCE_NOT_FOUND',
+      'Not Found',
+      'Appointment not found',
+      '/api/v1/appointments/70000000-0000-4000-8000-0000000000ff',
+    );
+  });
+
+  it('rejects a malformed appointment id with the validation contract', async () => {
+    await request(app.getHttpServer())
+      .get('/api/v1/appointments/not-a-uuid')
+      .expect(400)
+      .expect('content-type', /application\/problem\+json/)
+      .expect((response) => {
+        expect(response.body).toMatchObject({
+          code: 'VALIDATION_ERROR',
+          errors: [{ field: 'id', message: 'id must be a UUID' }],
+        });
+      });
+  });
+
+  it('rejects a start time in the past with 400', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/appointments')
+      .send({ ...validRequest, startTime: '2026-07-13T08:00:00.000Z' })
+      .expect(400)
+      .expect('content-type', /application\/problem\+json/)
+      .expect((response) => {
+        expect(response.body).toMatchObject({
+          code: 'INVALID_APPOINTMENT_TIME',
         });
       });
   });
@@ -128,7 +191,7 @@ describe('public API (e2e)', () => {
           requestId: 'validation-request',
           errors: [
             {
-              field: 'property',
+              field: 'unexpected',
               message: 'property unexpected should not exist',
             },
           ],
@@ -213,7 +276,7 @@ describe('public API (e2e)', () => {
         type OpenApiPath = { get?: Operation; post?: Operation };
         const paths = body.paths as Record<string, OpenApiPath>;
         const responses = paths['/api/v1/appointments']!.post!.responses;
-        for (const status of ['400', '404', '409', '500']) {
+        for (const status of ['400', '404', '409', '500', '503']) {
           const response = responses[status] as {
             content: Record<string, { schema: unknown }>;
           };

@@ -10,7 +10,11 @@ FROM dependencies AS build
 COPY prisma ./prisma
 COPY prisma.config.ts nest-cli.json tsconfig.json tsconfig.build.json ./
 COPY src ./src
-RUN pnpm prisma:generate && pnpm build
+# prisma.config.ts resolves DATABASE_URL at config load time. Client generation
+# never connects to a database, so a placeholder satisfies config resolution
+# without weakening the runtime requirement for a real DATABASE_URL.
+RUN DATABASE_URL="postgresql://build:build@localhost:5432/build" \
+  pnpm prisma:generate && pnpm build
 
 FROM build AS production-dependencies
 

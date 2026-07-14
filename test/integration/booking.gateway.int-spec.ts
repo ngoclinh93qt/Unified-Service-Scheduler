@@ -1,6 +1,11 @@
+import { Prisma } from '@prisma/client';
+
 import { PrismaService } from '../../src/database/prisma.service';
 import { CreateAppointmentCommand } from '../../src/modules/appointments/application/booking.types';
-import { PrismaAppointmentBookingGateway } from '../../src/modules/appointments/infrastructure/prisma-appointment-booking.gateway';
+import {
+  isExclusionViolation,
+  PrismaAppointmentBookingGateway,
+} from '../../src/modules/appointments/infrastructure/prisma-appointment-booking.gateway';
 import {
   PostgresTestEnvironment,
   startPostgresTestEnvironment,
@@ -176,6 +181,160 @@ describe('PrismaAppointmentBookingGateway', () => {
         dealershipId: ids.otherDealership,
       }),
     ).rejects.toMatchObject({ code: 'RESOURCES_UNAVAILABLE' });
+  });
+
+  it.each([
+    [
+      'service bay',
+      (first: { serviceBayId: string }) => ({
+        serviceBayId: first.serviceBayId,
+        technicianId: ids.technicianB,
+      }),
+    ],
+    [
+      'technician',
+      (first: { technicianId: string }) => ({
+        serviceBayId: ids.bayB,
+        technicianId: first.technicianId,
+      }),
+    ],
+  ])(
+    'rejects an overlapping %s reservation at the database level',
+    async (_label, conflictingAssignment) => {
+      const first = await gateway.book(commandAt('2026-07-14T08:00:00Z'));
+
+      // Bypass the application guard entirely: a direct insert of an
+      // overlapping confirmed appointment must be refused by the exclusion
+      // constraint, not the row-locking allocation path.
+      const caught = await prisma.appointment
+        .create({
+          data: {
+            customerId: ids.customer,
+            vehicleId: ids.vehicle,
+            dealershipId: ids.dealership,
+            serviceTypeId: ids.serviceType,
+            ...conflictingAssignment(first),
+            startTime: new Date('2026-07-14T08:30:00Z'),
+            endTime: new Date('2026-07-14T09:30:00Z'),
+          },
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+
+      expect(caught).toBeDefined();
+      // The gateway's conflict translation must recognize the real error shape
+      // PostgreSQL and Prisma produce for an exclusion violation.
+      expect(isExclusionViolation(caught)).toBe(true);
+      await expect(prisma.appointment.count()).resolves.toBe(1);
+    },
+  );
+
+  it.each([
+    [
+      'vehicle reassignment',
+      async (competing: Prisma.TransactionClient) => {
+        await competing.vehicle.update({
+          where: { id: ids.vehicle },
+          data: { customerId: ids.otherCustomer },
+        });
+      },
+    ],
+    [
+      'service type duration change',
+      async (competing: Prisma.TransactionClient) => {
+        await competing.serviceType.update({
+          where: { id: ids.serviceType },
+          data: { durationMinutes: 90, active: false },
+        });
+      },
+    ],
+  ])(
+    'blocks a concurrent %s until the booking commits',
+    async (_label, mutate) => {
+      await prisma.customer.create({
+        data: {
+          id: ids.otherCustomer,
+          name: 'Other',
+          email: 'other@example.com',
+        },
+      });
+
+      let mutationError: unknown;
+      const lockedGateway = new PrismaAppointmentBookingGateway(prisma, {
+        afterResourcesLocked: async () => {
+          // The booking transaction holds FOR SHARE locks on its reference
+          // rows; a competing mutation must wait, so with a lock timeout it
+          // fails instead of invalidating the already-validated references.
+          mutationError = await prisma
+            .$transaction(async (competing) => {
+              await competing.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
+              await mutate(competing);
+            })
+            .then(
+              () => undefined,
+              (error: unknown) => error,
+            );
+        },
+      });
+
+      await expect(
+        lockedGateway.book(commandAt('2026-07-14T08:00:00Z')),
+      ).resolves.toMatchObject({
+        customerId: ids.customer,
+        endTime: new Date('2026-07-14T09:00:00Z'),
+      });
+      expect(mutationError).toBeDefined();
+    },
+  );
+
+  it('blocks a concurrent qualification revocation until the booking commits', async () => {
+    let revocationError: unknown;
+    const lockedGateway = new PrismaAppointmentBookingGateway(prisma, {
+      afterResourcesLocked: async () => {
+        // While the booking transaction holds the qualification row locks, a
+        // concurrent revocation must wait; with a lock timeout it fails
+        // instead of silently de-qualifying the technician mid-booking.
+        revocationError = await prisma
+          .$transaction(async (competing) => {
+            await competing.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
+            await competing.technicianQualification.delete({
+              where: {
+                technicianId_serviceTypeId: {
+                  technicianId: ids.technicianA,
+                  serviceTypeId: ids.serviceType,
+                },
+              },
+            });
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+      },
+    });
+
+    await expect(
+      lockedGateway.book(commandAt('2026-07-14T08:00:00Z')),
+    ).resolves.toMatchObject({ technicianId: ids.technicianA });
+    expect(revocationError).toBeDefined();
+    await expect(
+      prisma.technicianQualification.count({
+        where: { technicianId: ids.technicianA },
+      }),
+    ).resolves.toBe(1);
+  });
+
+  it('reads a booked appointment back by id and returns null when absent', async () => {
+    const booked = await gateway.book(commandAt('2026-07-14T08:00:00Z'));
+    await expect(gateway.findById(booked.id)).resolves.toMatchObject({
+      id: booked.id,
+      serviceBayId: booked.serviceBayId,
+      technicianId: booked.technicianId,
+      status: 'CONFIRMED',
+    });
+    await expect(gateway.findById(ids.otherServiceType)).resolves.toBeNull();
   });
 });
 

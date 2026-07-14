@@ -7,7 +7,6 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 
 import { ProblemDetailsFilter } from '../common/errors/problem-details.filter';
-import { RequestIdMiddleware } from '../common/http/request-id.middleware';
 
 export function configureApp(app: INestApplication): void {
   app.useLogger(app.get(Logger));
@@ -21,9 +20,6 @@ export function configureApp(app: INestApplication): void {
     }),
   );
   app.useGlobalFilters(app.get(ProblemDetailsFilter));
-
-  const requestIdMiddleware = app.get(RequestIdMiddleware);
-  app.use(requestIdMiddleware.use.bind(requestIdMiddleware));
   app.enableShutdownHooks();
 
   const swaggerConfig = new DocumentBuilder()

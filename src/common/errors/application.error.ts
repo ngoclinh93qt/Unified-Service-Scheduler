@@ -1,5 +1,9 @@
 export type ApplicationErrorCode =
-  'REFERENCE_NOT_FOUND' | 'REFERENCE_CONFLICT' | 'RESOURCES_UNAVAILABLE';
+  | 'INVALID_APPOINTMENT_TIME'
+  | 'REFERENCE_NOT_FOUND'
+  | 'REFERENCE_CONFLICT'
+  | 'RESOURCES_UNAVAILABLE'
+  | 'TRANSIENT_FAILURE';
 
 export class ApplicationError extends Error {
   constructor(

@@ -14,6 +14,7 @@ type Candidate = Readonly<{ id: string }>;
 
 export type BookingTransactionHooks = Readonly<{
   beforeResourcesLocked?: () => Promise<void>;
+  afterResourcesLocked?: () => Promise<void>;
 }>;
 
 @Injectable()
@@ -25,71 +26,122 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
   ) {}
 
   async book(command: CreateAppointmentCommand): Promise<BookedAppointment> {
-    return this.prisma.$transaction(async (transaction) => {
-      const customer = await transaction.customer.findUnique({
-        where: { id: command.customerId },
-      });
-      const vehicle = await transaction.vehicle.findUnique({
-        where: { id: command.vehicleId },
-      });
-      const dealership = await transaction.dealership.findUnique({
-        where: { id: command.dealershipId },
-      });
-      const serviceType = await transaction.serviceType.findUnique({
-        where: { id: command.serviceTypeId },
-      });
-
-      if (!customer) throw referenceNotFound('Customer');
-      if (!vehicle) throw referenceNotFound('Vehicle');
-      if (!dealership) throw referenceNotFound('Dealership');
-      if (!serviceType) throw referenceNotFound('Service type');
-      if (vehicle.customerId !== customer.id) {
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => this.bookInTransaction(transaction, command),
+        // Bound how long a booking may queue behind other dealership bookings
+        // and how long it may hold the candidate row locks.
+        { maxWait: 5_000, timeout: 10_000 },
+      );
+    } catch (error) {
+      // Deadlocks, lock/transaction timeouts and cancelled statements are
+      // retryable contention outcomes, not internal faults. Internal retry is
+      // deferred; expose them as 503 so clients can retry deliberately.
+      if (isTransientFailure(error)) {
         throw new ApplicationError(
-          'REFERENCE_CONFLICT',
-          'Vehicle does not belong to the customer',
+          'TRANSIENT_FAILURE',
+          'The booking could not be completed due to temporary contention; retry the request',
         );
       }
-      if (!serviceType.active) throw resourcesUnavailable();
+      throw error;
+    }
+  }
 
-      const interval = AppointmentInterval.create(
-        command.startTime,
-        serviceType.durationMinutes,
-      );
-      await this.hooks.beforeResourcesLocked?.();
-      const bays = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
-        SELECT b.id
-        FROM service_bays b
-        WHERE b.dealership_id = ${dealership.id}::uuid
-          AND b.active = true
-        ORDER BY b.id
-        FOR UPDATE
-      `);
-      const technicians = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
-        SELECT t.id
-        FROM technicians t
-        INNER JOIN technician_qualifications q ON q.technician_id = t.id
-        WHERE t.dealership_id = ${dealership.id}::uuid
-          AND t.active = true
-          AND q.service_type_id = ${serviceType.id}::uuid
-        ORDER BY t.id
-        FOR UPDATE OF t
-      `);
+  async findById(id: string): Promise<BookedAppointment | null> {
+    const appointment = await this.prisma.appointment.findUnique({
+      where: { id },
+    });
+    return appointment ? toBookedAppointment(appointment) : null;
+  }
 
-      const serviceBay = await firstAvailableCandidate(
-        transaction,
-        bays,
-        'serviceBayId',
-        interval,
-      );
-      const technician = await firstAvailableCandidate(
-        transaction,
-        technicians,
-        'technicianId',
-        interval,
-      );
-      if (!serviceBay) throw resourcesUnavailable();
-      if (!technician) throw resourcesUnavailable();
+  private async bookInTransaction(
+    transaction: Prisma.TransactionClient,
+    command: CreateAppointmentCommand,
+  ): Promise<BookedAppointment> {
+    // Share-lock the reference rows for the lifetime of the transaction:
+    // concurrent bookings can hold the same share locks, but a competing
+    // mutation (vehicle reassignment, service-type deactivation or duration
+    // change) must wait for this booking to commit. The validated ownership
+    // and duration therefore still hold at commit time. The interval itself is
+    // snapshotted on the appointment, so later reference changes do not rewrite
+    // history.
+    const [customer] = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
+      SELECT id FROM customers WHERE id = ${command.customerId}::uuid FOR SHARE
+    `);
+    const [vehicle] = await transaction.$queryRaw<
+      Array<Readonly<{ id: string; customerId: string }>>
+    >(Prisma.sql`
+      SELECT id, customer_id AS "customerId"
+      FROM vehicles WHERE id = ${command.vehicleId}::uuid FOR SHARE
+    `);
+    const [dealership] = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
+      SELECT id FROM dealerships
+      WHERE id = ${command.dealershipId}::uuid FOR SHARE
+    `);
+    const [serviceType] = await transaction.$queryRaw<
+      Array<Readonly<{ id: string; durationMinutes: number; active: boolean }>>
+    >(Prisma.sql`
+      SELECT id, duration_minutes AS "durationMinutes", active
+      FROM service_types WHERE id = ${command.serviceTypeId}::uuid FOR SHARE
+    `);
 
+    if (!customer) throw referenceNotFound('Customer');
+    if (!vehicle) throw referenceNotFound('Vehicle');
+    if (!dealership) throw referenceNotFound('Dealership');
+    if (!serviceType) throw referenceNotFound('Service type');
+    if (vehicle.customerId !== customer.id) {
+      throw new ApplicationError(
+        'REFERENCE_CONFLICT',
+        'Vehicle does not belong to the customer',
+      );
+    }
+    if (!serviceType.active) throw resourcesUnavailable();
+
+    const interval = AppointmentInterval.create(
+      command.startTime,
+      serviceType.durationMinutes,
+    );
+    await this.hooks.beforeResourcesLocked?.();
+    const bays = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
+      SELECT b.id
+      FROM service_bays b
+      WHERE b.dealership_id = ${dealership.id}::uuid
+        AND b.active = true
+      ORDER BY b.id
+      FOR UPDATE
+    `);
+    // Lock the qualification rows as well as the technicians: a concurrent
+    // revocation must wait for this booking to commit, so a confirmed
+    // appointment can never reference a technician whose qualification was
+    // already removed at commit time.
+    const technicians = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
+      SELECT t.id
+      FROM technicians t
+      INNER JOIN technician_qualifications q ON q.technician_id = t.id
+      WHERE t.dealership_id = ${dealership.id}::uuid
+        AND t.active = true
+        AND q.service_type_id = ${serviceType.id}::uuid
+      ORDER BY t.id
+      FOR UPDATE OF t, q
+    `);
+    await this.hooks.afterResourcesLocked?.();
+
+    const serviceBay = await firstAvailableCandidate(
+      transaction,
+      bays,
+      'serviceBayId',
+      interval,
+    );
+    const technician = await firstAvailableCandidate(
+      transaction,
+      technicians,
+      'technicianId',
+      interval,
+    );
+    if (!serviceBay) throw resourcesUnavailable();
+    if (!technician) throw resourcesUnavailable();
+
+    try {
       const appointment = await transaction.appointment.create({
         data: {
           customerId: customer.id,
@@ -103,7 +155,14 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
         },
       });
       return toBookedAppointment(appointment);
-    });
+    } catch (error) {
+      // Defense in depth: the row locks above already prevent a race, but the
+      // database exclusion constraints are the final authority on temporal
+      // non-overlap. A violation means the interval was taken; surface it as a
+      // conflict rather than an internal error.
+      if (isExclusionViolation(error)) throw resourcesUnavailable();
+      throw error;
+    }
   }
 }
 
@@ -127,6 +186,38 @@ async function firstAvailableCandidate(
   }
 
   return undefined;
+}
+
+const EXCLUSION_VIOLATION = '23P01';
+// deadlock_detected, lock_not_available, query_canceled (statement timeout),
+// and Prisma's transaction-API timeout.
+const TRANSIENT_CODES = new Set(['40P01', '55P03', '57014', 'P2028']);
+
+// Prisma driver adapters wrap the PostgreSQL error: the SQLSTATE lives on the
+// `cause` chain (DriverAdapterError -> { kind: 'postgres', code: '23P01' }),
+// so walk the chain instead of trusting one fixed shape.
+function causeChainHasCode(
+  error: unknown,
+  matches: (code: unknown) => boolean,
+): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== 'object' || current === null) return false;
+    if (matches((current as { code?: unknown }).code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+export function isExclusionViolation(error: unknown): boolean {
+  return causeChainHasCode(error, (code) => code === EXCLUSION_VIOLATION);
+}
+
+export function isTransientFailure(error: unknown): boolean {
+  return causeChainHasCode(
+    error,
+    (code) => typeof code === 'string' && TRANSIENT_CODES.has(code),
+  );
 }
 
 function referenceNotFound(reference: string): ApplicationError {
