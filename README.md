@@ -1,12 +1,8 @@
 # Unified Service Scheduler
 
-The System Design Document for this submission lives at [`docs/system-design.html`](docs/system-design.html) (open it in any browser).
-
 ## Overview
 
-This repository is a production-shaped first milestone for a vehicle-service scheduler. It exposes one thin but complete vertical slice: create an appointment while the server derives its duration and transactionally assigns an available service bay and qualified technician.
-
-The milestone favors a small, reviewable foundation over feature breadth. It includes validation, RFC 9457-style failures, request correlation, structured logs, health checks, OpenAPI, deterministic seed data, PostgreSQL-backed concurrency tests, containerized execution, and CI.
+This repository implements the first milestone of a vehicle-service scheduler: create an appointment while the server derives its duration and safely assigns an available bay and qualified technician. It includes validation, problem details, structured logs, health checks, OpenAPI, deterministic seed data, PostgreSQL-backed tests, containers, and CI.
 
 ## Architecture
 
@@ -17,8 +13,6 @@ The application is a NestJS modular monolith with one PostgreSQL database. The a
 - Domain code owns pure half-open interval rules and has no NestJS or Prisma dependency.
 - Infrastructure owns Prisma, PostgreSQL transactions, stable row-lock ordering, overlap checks, and persistence.
 - Common modules provide configuration validation, problem details, logging, and request IDs.
-
-This separation keeps allocation strategy and future concurrency hardening behind the existing public use case without introducing a repository abstraction for every table.
 
 ## Prerequisites
 
@@ -55,15 +49,13 @@ curl --fail http://localhost:3000/api/v1/health/ready
 curl --fail http://localhost:3000/docs-json
 ```
 
-The container entrypoint applies migrations and reruns the idempotent seed on every start. Normal Compose startup is non-destructive, so appointments persist when the app restarts with a retained PostgreSQL volume. Resetting appointments for the deterministic seed vehicle is an explicit assessment action described below. The built runtime image contains the pinned pnpm version, so an already-built container does not need npm registry access to run its entrypoint. This is still not a production pattern: production would run migrations as a separate release step and would not seed demo data during application startup.
+The entrypoint applies migrations and runs the idempotent seed; appointments remain in the retained PostgreSQL volume. In production, migrations and demo seed data would be handled outside application startup.
 
 Open `http://localhost:3000/docs` for Swagger UI. When finished:
 
 ```bash
 docker compose --profile app down --remove-orphans
 ```
-
-If the environment cannot pull the required `node:22-alpine` and `postgres:17-alpine` images from Docker Hub, image startup cannot proceed until registry access is restored or the images are already cached. This is an external registry prerequisite, not an application fallback.
 
 ## Database migrations and seed data
 
@@ -75,7 +67,7 @@ pnpm exec prisma migrate deploy
 pnpm db:seed
 ```
 
-`prisma migrate deploy` is the reproducible setup path. `pnpm db:migrate` uses the interactive development workflow for authoring a new migration. `pnpm db:seed` first generates the Prisma Client, so it also works immediately after a clean dependency install. Without the assessment-only reset flag, the seed can be rerun non-destructively and creates one customer and vehicle, one UTC dealership, a 60-minute oil change, two bays, and one qualified technician. Stable identifiers live in `prisma/seed-data.ts` and are used below.
+`prisma migrate deploy` applies committed migrations; `pnpm db:migrate` is only for authoring new ones. The seed is safe to rerun and creates the fixed review data used below.
 
 ## API and OpenAPI
 
@@ -85,9 +77,7 @@ pnpm db:seed
 - `GET /api/v1/health/ready` verifies database reachability.
 - `GET /docs` serves Swagger UI; `GET /docs-json` serves the OpenAPI document.
 
-The client supplies reference IDs and an ISO 8601 start instant. The server selects resources and derives `endTime` from the authoritative service duration. The start instant must be in the future; a past `startTime` is rejected with `400 INVALID_APPOINTMENT_TIME`. Unknown request properties are rejected. Failures use a stable problem-details contract and do not expose stack traces, Prisma messages, SQL, or environment values.
-
-An upper booking horizon (for example, "no more than 90 days ahead") is a deliberate business rule for a later milestone and is intentionally not enforced yet, so the example below can use a far-future instant.
+The client supplies reference IDs and an ISO 8601 start time. The server selects resources and derives `endTime` from the stored service duration. Invalid requests return problem details without exposing internal errors.
 
 ## Example booking request
 
@@ -144,39 +134,44 @@ Test boundaries are intentional:
 
 ## Concurrency guarantees and milestone boundaries
 
-Appointment intervals are UTC half-open intervals `[start, end)`, so back-to-back appointments do not overlap. In one database transaction, the gateway validates relationships, locks compatible bays and technicians in stable ID order, rechecks the requested start against PostgreSQL `clock_timestamp()` after any lock wait, rechecks committed vehicle and resource overlaps for the complete interval, chooses the first complete pair deterministically, persists the appointment, and returns only after commit. PostgreSQL-backed barrier tests prove both sides of this behavior: exactly one contender commits when only one pair exists, while two different vehicles contending with two complete pairs both commit on distinct pairs after the waiting transaction rechecks availability.
+Booking uses UTC half-open intervals `[start, end)`. Allocation runs in one PostgreSQL transaction and protects the rule that a confirmed appointment cannot overlap the same vehicle, bay, or technician.
 
-Two layers protect the central invariant. The allocation path above provides deliberate behavior (a waiting request rechecks committed truth and, for a different vehicle, can fall through to another free pair). Underneath it, PostgreSQL GiST **exclusion constraints** on `(vehicle_id, [start,end))`, `(service_bay_id, [start,end))`, and `(technician_id, [start,end))` for `CONFIRMED` rows are the final authority: they reject overlapping reservations even against manual writes or bypass paths, independent of the application guard. Integration tests isolate and prove all three constraints and verify that the gateway's conflict translation recognizes the real driver error shape.
+- The gateway locks resources in a stable order and rechecks availability before saving.
+- PostgreSQL exclusion constraints provide a final database-level safeguard.
+- Business conflicts return `409`; known temporary database failures return `503`.
+- Locking all compatible resources keeps this milestone simple but can serialize bookings within one dealership.
 
-The allocation query also locks the technician **qualification rows**, not just the technicians: a concurrent qualification revocation must wait for the booking to commit, so a confirmed appointment can never reference a technician whose qualification was already removed at commit time. Reference rows (customer, vehicle, dealership, service type) are read with `FOR SHARE`, so concurrent bookings do not block each other but a competing vehicle reassignment or service-type change must wait for the booking to commit — the validated ownership and duration still hold at commit time. Integration tests hold the locks and prove that competing revocations and reference mutations block. The booking transaction is bounded by explicit `maxWait` and `timeout` limits.
-
-Failure semantics under contention are explicit: PostgreSQL deadlock, lock-timeout and statement-cancellation SQLSTATEs (`40P01`, `55P03`, `57014`) plus Prisma's documented write-conflict/deadlock code (`P2034`) are classified as `503 TRANSIENT_FAILURE` with a `Retry-After` hint, distinct from business conflicts (`409`) and unexpected faults (`500`). Generic Prisma Transaction API failures (`P2028`) are not assumed retryable; only the structured interactive-transaction timeout subtype, with numeric `timeout` and elapsed `timeTaken` metadata, is classified as transient. A real PostgreSQL/Prisma integration test verifies that adapter shape. Internal bounded retry of an aborted transaction is deferred: a responsible policy needs a budget, backoff and observability. That remains separate from **idempotency-key replay**, which addresses client retries and lost responses and is also deferred.
-
-Every booking command that reaches the application layer emits a structured outcome event (`booking_confirmed` / `booking_rejected` with the rejection code and duration); transport-level DTO rejections are covered by the HTTP request log. HTTP logging redacts `Authorization` and `Cookie`, and unexpected failures record only correlation and error type rather than raw messages or stacks. Nest shutdown hooks call Prisma's `$disconnect()` before process exit.
-
-A deliberate trade-off: locking every compatible bay and technician of the dealership serializes concurrent bookings within one dealership even when their intervals do not overlap. This is acceptable for the current milestone; refining the lock to the requested interval (or relying on the exclusion constraints plus bounded retry) is the next step if measured contention justifies it.
-
-This is a credible first-milestone guarantee, not the final distributed concurrency contract. Idempotency-key replay, bounded retries for retryable transaction failures (`40P01`), and lost-response recovery are deliberately deferred. No in-memory test is used to claim transaction or concurrency safety.
+Idempotency keys, internal retries, and lost-response recovery are deferred.
 
 ## Assumptions and deliberately deferred work
 
-- Seeded dealership time is UTC and callers submit absolute ISO 8601 instants.
-- Allocation is deterministic first-fit, not an optimization or load-balancing policy.
-- Authentication, authorization, notifications, cancellation, rescheduling, frontend UI, production secret management, and multi-region writes are outside this milestone.
-- Temporal exclusion constraints are implemented as the database-level authority; idempotency-key replay is not yet implemented and must not be inferred from the locking approach.
-- The database is the authoritative source for duration, ownership, qualification, resource activity, and appointment state.
+- The seeded dealership uses UTC, and allocation uses deterministic first-fit.
+- The database is authoritative for duration, ownership, qualification, resource state, and appointments.
+- Authentication, authorization, notifications, cancellation, rescheduling, frontend UI, production secrets, and multi-region writes are outside this milestone.
 
 ## AI collaboration narrative
 
-I used AI as a reviewed collaborator, not an authority. I set the direction — the central invariant (no confirmed appointments overlap for the same vehicle, bay or technician) and the milestone boundaries — and treated every AI proposal as a draft to interrogate before accepting. Three concrete examples of that loop:
+During design, I used AI to explore requirements, architecture, and concurrency options. During implementation, AI helped with planning, coding, and review; I remained responsible for architecture, correctness, and scope.
 
-- **Concurrency.** An early AI draft checked availability with a `SELECT` and then `INSERT`ed, which leaves a race window between the check and the write. I rejected it, specified `SELECT ... FOR UPDATE` on candidate rows in a stable ID order (to avoid the bay/technician deadlock cycle) with a post-lock overlap recheck, and then asked for the design to be proven rather than asserted. That produced Testcontainers barrier tests where two competing transactions race for a single pair and exactly one commits, and where two different vehicles contending for two pairs both commit on distinct pairs after rechecking ([test/integration/booking.gateway.int-spec.ts](test/integration/booking.gateway.int-spec.ts)). I also insisted the database keep its own authority, which is why GiST exclusion constraints exist alongside the locks.
+### From setup to delivery
 
-- **Scope discipline.** AI was happy to describe the service as "production-ready" and to fold in idempotency, retries, and metrics as if built. I pushed back on any claim without executable evidence: idempotency-key replay and retry policy are documented as deferred, not implemented, and the README and design doc now separate what runs from what is designed for the next milestone.
+I built the service in small stages: project setup, database, domain rules, use case, PostgreSQL adapter, HTTP API, tests, containers, and CI. For each stage, I clarified the requirement, discussed trade-offs with AI, and approved a small plan before implementation.
 
-- **Correctness gaps I caught in review.** The generated slice accepted a `startTime` in the past, created no read-back path, and initially treated only bays and technicians as exclusive. I added early validation plus an authoritative database-time recheck, a `GET /appointments/{id}` endpoint with a `Location` header, and a vehicle exclusion constraint. Each behavior is backed by focused tests, including direct PostgreSQL writes that bypass the gateway.
+Each task followed the same small review loop:
 
-Every accepted change went through focused unit tests, PostgreSQL-backed integration and e2e suites, a clean typecheck/lint/build, and a read of the primary docs for the tools involved. I own every line and the final system behavior; AI accelerated the drafting, not the judgement.
+1. **Clarify:** confirm the requirement, assumptions, and acceptance criteria.
+2. **Plan:** compare options and split the work into a small task.
+3. **Implement with TDD:** write a failing test, make the smallest change, and rerun the test.
+4. **Review and verify:** inspect the diff, check edge cases, run wider checks, and refresh the context before the next task.
+
+Small tasks kept the context focused. I reviewed every result against the original acceptance criteria to catch inconsistent code, weakened requirements, and missed edge cases.
+
+### Evidence from review loops
+
+- The initial transaction (`75f854c`) filtered availability inside the locking query, so a request that waited on a lock could act on stale availability. In review I split locking from selection — lock all active candidates first, then re-check overlaps after any wait — and proved it with [`allocates a single pair to exactly one competing transaction`](test/integration/booking.gateway.int-spec.ts) (`4a04686`).
+- A test hook became a required runtime dependency. I made it optional and added [`constructs without registering test transaction hooks`](src/modules/appointments/infrastructure/prisma-appointment-booking.gateway.spec.ts) (`fb2d32f`).
+
+The final gate runs formatting, lint, type checking, unit, integration and end-to-end tests, and the production build. AI helped me move faster through this loop; I reviewed and approved the final result.
 
 ## Project structure
 

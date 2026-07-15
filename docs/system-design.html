@@ -543,10 +543,10 @@
         <a href="#summary">1. Executive summary</a>
         <a href="#requirements">2. Requirements</a>
         <a href="#architecture">3. Architecture</a>
-        <a href="#booking">4. Booking correctness</a>
+        <a href="#booking">4. Booking flow</a>
         <a href="#model">5. Data model</a>
-        <a href="#api">6. API &amp; failures</a>
-        <a href="#quality">7. Quality &amp; verification</a>
+        <a href="#api">6. API &amp; errors</a>
+        <a href="#quality">7. Reliability &amp; verification</a>
         <a href="#ai">8. AI collaboration</a>
       </nav>
       <div class="status">
@@ -556,48 +556,41 @@
 
     <main>
       <article>
-        <header id="summary">
+        <header>
           <div class="eyebrow">System Design Document · Scenario A</div>
           <h1>The Unified Service Scheduler</h1>
           <p class="lead">
-            A correctness-first backend that confirms an appointment only after
-            one service bay and one qualified technician have been reserved for
-            the complete service interval.
+            A backend that confirms an appointment only when a service bay and a
+            qualified technician are available for the full service time.
           </p>
-          <div class="callout">
-            <strong>Central invariant.</strong> Two confirmed appointments must
-            never reserve the same vehicle, service bay or technician for
-            overlapping time intervals.
-          </div>
-          <div class="callout">
-            <strong>Implementation status (this milestone).</strong> The
-            implementation provides the <code>POST</code>/<code>GET</code>
-            booking slice, application and database-time validation, the
-            transactional allocation path (share-locked reference rows plus
-            exclusively locked candidate rows), PostgreSQL GiST exclusion
-            constraints for vehicle, bay and technician, precise
-            transient-failure classification to <code>503</code>, credential
-            redaction, structured booking outcome logging and graceful Prisma
-            disconnect. Idempotent replay, internal retry/backoff,
-            principal-derived identity and metrics/tracing are explicitly
-            deferred.
-          </div>
         </header>
 
+        <section id="summary">
+          <h2>1. Executive summary</h2>
+          <div class="callout">
+            <strong>Design goal.</strong> Confirm an appointment only when the
+            vehicle, a service bay and a qualified technician are available for
+            the full service time.
+          </div>
+          <div class="callout">
+            <strong>Design approach.</strong> The backend checks availability,
+            selects the resources and creates the appointment in one PostgreSQL
+            transaction. Database rules prevent overlapping bookings, including
+            requests made at the same time.
+          </div>
+        </section>
+
         <section id="requirements">
-          <h2>2. Requirements, provenance and scope</h2>
+          <h2>2. Requirements, assumptions and scope</h2>
           <p>
-            The brief is intentionally ambiguous. The labels below distinguish
-            official requirements from engineering deductions and submission
-            choices.
+            This section defines the requirements, assumptions and design
+            decisions used in this solution.
           </p>
           <p>
-            <span class="badge given">GIVEN</span> official brief &nbsp;
-            <span class="badge inferred">INFERRED</span> required for
-            correctness &nbsp;
-            <span class="badge assumed">ASSUMED</span> stakeholder clarification
-            needed &nbsp; <span class="badge decided">DECIDED</span> submission
-            choice
+            <span class="badge given">GIVEN</span> stated requirement &nbsp;
+            <span class="badge inferred">INFERRED</span> needed for correctness
+            &nbsp; <span class="badge assumed">ASSUMED</span> design assumption
+            &nbsp; <span class="badge decided">DECIDED</span> scope decision
           </p>
           <div class="table-scroll">
             <table>
@@ -605,7 +598,7 @@
                 <tr>
                   <th>ID</th>
                   <th>Requirement</th>
-                  <th>Source</th>
+                  <th>Type</th>
                 </tr>
               </thead>
               <tbody>
@@ -652,8 +645,8 @@
                 <tr>
                   <td>R6</td>
                   <td>
-                    Confirmation is synchronous; replay-safe duplicate requests
-                    are outside this implementation milestone.
+                    The current design does not automatically handle duplicate
+                    booking requests.
                   </td>
                   <td><span class="badge decided">DECIDED</span></td>
                 </tr>
@@ -667,30 +660,31 @@
               technician.
             </li>
             <li>
-              Appointments use half-open UTC intervals
-              <code>[start, end)</code>; back-to-back work is allowed.
+              Appointments are stored in UTC and use
+              <code>[start, end)</code>, so one appointment can start exactly
+              when another ends.
             </li>
             <li>
-              Service duration is elapsed time:
-              <code>endTime = startTime + duration</code> after converting the
-              requested instant to UTC. Future business-hours rules will be
-              evaluated in the dealership's IANA timezone and local wall-clock,
-              including DST transitions.
+              The server calculates the end time by adding the service duration
+              to the requested start time. Business hours can be added later
+              using the dealership's timezone.
             </li>
             <li>
               Bays are interchangeable in the first release; technician
               qualification depends on service type.
             </li>
             <li>
-              Reference data—dealership, vehicles, service types, bays,
-              technicians and skills—is seeded.
+              Dealerships, vehicles, service types, bays, technicians and skills
+              already exist before a booking is created.
             </li>
           </ul>
           <h3>Deliberately out of scope</h3>
           <p>
-            Production authentication, notifications, cancellation/rescheduling
-            and multi-region writes. These do not improve proof of the core
-            scheduling invariant.
+            Authentication and authorization are outside the current scope. In
+            production, customer and dealership access would come from the
+            signed-in user, and access to customer and vehicle data would be
+            audited. Notifications, cancellation, rescheduling and multi-region
+            writes are also out of scope.
           </p>
         </section>
 
@@ -706,11 +700,10 @@
             >
               <title id="arch-title">Modular monolith runtime flow</title>
               <desc id="arch-desc">
-                Runtime calls flow from the API client through HTTP and
-                application layers, a booking port and the Prisma adapter to
-                PostgreSQL. The Prisma adapter invokes pure interval domain
-                logic inside its transaction; the domain has no framework or
-                persistence dependency.
+                A booking request moves from the API client through the HTTP and
+                application layers, then through the Prisma adapter to
+                PostgreSQL. Domain logic checks time ranges without depending on
+                the framework or database.
               </desc>
               <defs>
                 <marker
@@ -747,7 +740,7 @@
                 ></rect>
                 <text class="diagram-title" x="70" y="106">API client</text>
                 <text class="diagram-detail" x="70" y="126">
-                  OpenAPI harness
+                  API test client
                 </text>
 
                 <rect
@@ -775,7 +768,7 @@
                 ></rect>
                 <text class="diagram-title" x="427.5" y="106">Application</text>
                 <text class="diagram-detail" x="427.5" y="126">
-                  orchestration · ports
+                  booking flow · interfaces
                 </text>
 
                 <rect
@@ -788,7 +781,7 @@
                 ></rect>
                 <text class="diagram-title" x="605" y="106">Booking port</text>
                 <text class="diagram-detail" x="605" y="126">
-                  application contract
+                  booking interface
                 </text>
 
                 <rect
@@ -803,7 +796,7 @@
                   Prisma adapter
                 </text>
                 <text class="diagram-detail" x="787.5" y="126">
-                  transaction · allocation
+                  transaction · resource selection
                 </text>
 
                 <rect
@@ -816,7 +809,7 @@
                 ></rect>
                 <text class="diagram-title" x="1005" y="106">PostgreSQL</text>
                 <text class="diagram-detail" x="1005" y="126">
-                  constraints · durable data
+                  booking rules · stored data
                 </text>
 
                 <rect
@@ -831,7 +824,7 @@
                   Domain logic
                 </text>
                 <text class="diagram-detail" x="427.5" y="234">
-                  interval · overlap semantics
+                  time range · overlap check
                 </text>
               </g>
 
@@ -851,9 +844,9 @@
               </text>
             </svg>
             <figcaption>
-              Arrows show runtime calls, not source-code dependencies. The
-              application depends on the booking port; the Prisma adapter
-              implements it and owns the database transaction.
+              Arrows show how a booking request moves through the system. The
+              application uses the booking port, and the Prisma adapter runs the
+              database transaction.
             </figcaption>
           </figure>
           <div class="table-scroll">
@@ -869,41 +862,38 @@
                 <tr>
                   <td>HTTP adapter</td>
                   <td>
-                    Transport validation, correlation IDs, HTTP mapping and
-                    OpenAPI.
+                    Validates HTTP requests, adds request IDs, returns
+                    consistent responses and provides the OpenAPI contract.
                   </td>
                   <td>Does not select resources.</td>
                 </tr>
                 <tr>
                   <td>Application</td>
                   <td>
-                    Validates the command time, orchestrates the use case, emits
-                    booking outcome events and invokes the booking port.
+                    Checks the booking time, coordinates the booking flow,
+                    records the result and calls the booking port.
                   </td>
                   <td>Does not depend on Prisma types.</td>
                 </tr>
                 <tr>
                   <td>Domain</td>
                   <td>
-                    Defines interval construction and overlap semantics in pure
-                    TypeScript.
+                    Calculates service time ranges and checks whether they
+                    overlap.
                   </td>
                   <td>No framework or I/O imports.</td>
                 </tr>
                 <tr>
                   <td>Persistence adapter</td>
                   <td>
-                    Owns the PostgreSQL transaction, qualification/allocation
-                    queries, locking and constraint-error translation.
+                    Runs the PostgreSQL transaction, finds suitable resources,
+                    locks rows and converts database errors.
                   </td>
                   <td>PostgreSQL-specific behavior stays here.</td>
                 </tr>
                 <tr>
                   <td>PostgreSQL</td>
-                  <td>
-                    Authoritative appointment state and final enforcement of
-                    temporal non-overlap.
-                  </td>
+                  <td>Stores appointments and rejects overlapping bookings.</td>
                   <td>Confirmation exists only after commit.</td>
                 </tr>
               </tbody>
@@ -913,62 +903,65 @@
           <div class="decision">
             <div class="label">NestJS</div>
             <div>
-              Strong module/DI boundaries and first-class validation/OpenAPI
-              support; appropriate for a small maintainable service.
+              Organizes the backend into clear modules and provides validation
+              and OpenAPI support.
             </div>
           </div>
           <div class="decision">
             <div class="label">PostgreSQL</div>
             <div>
-              ACID transactions, row locking and GiST exclusion constraints
-              directly support the hardest correctness requirement.
+              Transactions, row locks and exclusion constraints directly prevent
+              double booking.
             </div>
           </div>
           <div class="decision">
             <div class="label">Prisma</div>
             <div>
-              Type-safe routine access and migrations. It is deliberately
-              bypassed with parameterized raw SQL only for lock-sensitive
-              PostgreSQL features.
+              Provides type-safe database access and migrations. Raw SQL is used
+              only for PostgreSQL locking features that Prisma does not expose.
             </div>
           </div>
           <div class="decision">
             <div class="label">Testcontainers</div>
             <div>
-              Concurrency and exclusion semantics must be tested against real
-              PostgreSQL; an in-memory substitute cannot prove them.
+              Runs automated concurrency tests against real PostgreSQL instead
+              of an in-memory database.
             </div>
           </div>
         </section>
 
         <section id="booking">
-          <h2>4. Booking flow and concurrency correctness</h2>
+          <h2>4. Booking flow and concurrent requests</h2>
           <div class="callout">
-            <strong>Transaction policy.</strong> The booking path uses
-            PostgreSQL <code>READ COMMITTED</code>. It share-locks reference
-            rows for consistency, then exclusively locks compatible bays and
-            qualified technicians in stable ID order. Those resource rows are
-            coordination points; a lock does not represent an abstract time
-            interval.
+            <strong>Transaction approach.</strong> Each booking runs in one
+            PostgreSQL <code>READ COMMITTED</code> transaction. The transaction
+            keeps reference data unchanged, then locks suitable bays and
+            technicians in a fixed order. After any wait, it checks availability
+            again before creating the appointment.
+          </div>
+          <div class="callout warn">
+            <strong>Known trade-off.</strong> Locking all suitable resources
+            means booking requests for the same dealership may wait for each
+            other. This is acceptable for the assumed load. The system can lock
+            fewer rows later if waiting becomes frequent.
           </div>
           <ol>
             <li>
-              Begin one adapter-owned transaction; lock and validate reference
-              rows, load service duration and derive the UTC interval.
+              Start one transaction, validate the referenced data, load the
+              service duration and calculate the UTC time range.
             </li>
             <li>
-              Lock compatible bays, qualified technicians and qualification rows
-              in stable ID order.
+              Lock suitable bays, qualified technicians and their qualification
+              records in a fixed order.
             </li>
             <li>
-              After any wait, re-check database time plus vehicle, bay and
-              technician overlaps for the complete interval.
+              Check the start time and availability of the vehicle, bays and
+              technicians again after acquiring the locks.
             </li>
             <li>
-              Select the first available pair, persist and commit. Return
-              <code>201</code> only after commit; otherwise roll back and return
-              the mapped <code>400</code>, <code>409</code> or
-              <code>503</code> outcome.
+              Select the first available pair, create the appointment and
+              commit. Return success only after the commit; otherwise roll back
+              and return the appropriate error.
             </li>
           </ol>
           <figure>
@@ -981,9 +974,9 @@
             >
               <title id="seq-title">Concurrent booking sequence</title>
               <desc id="seq-desc">
-                Request A locks resources and commits. An overlapping Request B
-                waits for the lock, then rechecks A's committed state and either
-                chooses another complete resource pair or returns conflict.
+                Request A locks resources and saves its appointment. Request B
+                waits, checks availability again, then selects another free pair
+                or returns a conflict.
               </desc>
               <defs>
                 <marker
@@ -1057,15 +1050,15 @@
               </g>
               <g class="diagram-label" text-anchor="middle">
                 <text x="365" y="85">create appointment</text>
-                <text x="757" y="125">A: lock references and candidates</text>
+                <text x="757" y="125">A: lock data and suitable resources</text>
                 <text x="490" y="171">overlapping appointment</text>
-                <text x="757" y="211">B: wait for conflicting lock</text>
+                <text x="757" y="211">B: wait for resource lock</text>
                 <text x="757" y="259">A: insert and commit</text>
                 <text x="365" y="295">201 Created</text>
                 <text x="757" y="341">
-                  B: acquire lock and re-check overlap
+                  B: get lock and check availability again
                 </text>
-                <text x="490" y="385">another complete pair or 409</text>
+                <text x="490" y="385">another free pair or 409</text>
               </g>
               <rect
                 class="diagram-note"
@@ -1081,19 +1074,18 @@
                 y="442"
                 text-anchor="middle"
               >
-                Post-lock recheck observes Request A's committed appointment.
+                After waiting, Request B sees Request A's saved appointment.
               </text>
             </svg>
             <figcaption>
-              Waiting is not enough: Request B must re-check committed state
-              after acquiring the lock.
+              After waiting for a lock, Request B checks availability again.
             </figcaption>
           </figure>
-          <h3>Correctness controls</h3>
+          <h3>How double booking is prevented</h3>
           <p>
-            A separate availability read followed by an insert has a TOCTOU
-            race: two requests can observe the same free resources. The
-            authoritative decision therefore stays inside one transaction.
+            If availability is checked before the transaction, two requests may
+            select the same resources. The availability check and appointment
+            creation therefore happen in the same transaction.
           </p>
           <div class="table-scroll">
             <table>
@@ -1106,45 +1098,41 @@
               </thead>
               <tbody>
                 <tr>
-                  <td>DTO and time validation</td>
-                  <td>Reject malformed or invalid commands.</td>
-                  <td>Input correctness, not concurrency safety.</td>
+                  <td>Request and time validation</td>
+                  <td>Reject invalid booking requests.</td>
+                  <td>Valid input.</td>
                 </tr>
                 <tr>
-                  <td>Share-locked references</td>
-                  <td>Keep referenced definitions stable during allocation.</td>
-                  <td>Reference consistency.</td>
+                  <td>Locked reference data</td>
+                  <td>Prevent referenced data from changing during booking.</td>
+                  <td>Consistent customer, vehicle and service data.</td>
                 </tr>
                 <tr>
-                  <td>Candidate locks + post-lock recheck</td>
-                  <td>Coordinate competing allocators before selection.</td>
-                  <td>Prevents stale availability decisions.</td>
+                  <td>Resource locks and second availability check</td>
+                  <td>Coordinate booking requests made at the same time.</td>
+                  <td>Uses current availability before selection.</td>
                 </tr>
                 <tr>
-                  <td>GiST exclusion constraints</td>
+                  <td>PostgreSQL exclusion constraints</td>
                   <td>Reject overlapping vehicle, bay or technician use.</td>
-                  <td>Final invariant under every write path.</td>
+                  <td>Final database protection against double booking.</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <p>
-            Locks provide deliberate allocation: a waiter can choose another
-            complete pair instead of using a constraint violation as normal
-            control flow. Exclusion constraints remain the final authority for
-            application bugs and bypass writes. Stable lock order reduces the
-            known cycle but does not prove the whole system deadlock-free.
-            Proven transient contention maps to <code>503</code>; exclusion
-            violation <code>23P01</code> maps to <code>409</code> and is not
-            retried.
+            After waiting for a lock, a request can select another available
+            pair. Database constraints remain the final protection if the normal
+            booking flow is bypassed. A fixed lock order reduces deadlock risk.
+            A temporary database or lock problem returns <code>503</code>, while
+            an overlapping booking returns <code>409</code>.
           </p>
-          <h3>Allocation policy</h3>
+          <h3>Resource selection</h3>
           <p>
-            Filter compatible bays and qualified technicians, remove resources
-            with overlapping confirmed appointments, then choose the first free
-            bay and technician in stable ID order. This is deterministic and
-            testable; least-loaded or fair scheduling is a future policy behind
-            the same allocation port.
+            Find suitable bays and qualified technicians, remove those already
+            booked for the requested time, then choose the first free pair by
+            ID. This is simple and predictable. Fair or load-balanced scheduling
+            can be added later.
           </p>
           <h3>Rejected alternatives</h3>
           <div class="table-scroll">
@@ -1152,37 +1140,37 @@
               <thead>
                 <tr>
                   <th>Alternative</th>
-                  <th>Why not for this slice</th>
+                  <th>Why it was not selected</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
                   <td><code>SERIALIZABLE</code></td>
                   <td>
-                    Correct, but makes serialization abort and retry part of the
-                    normal write model; explicit resource locking is easier to
-                    demonstrate here.
+                    Correct, but PostgreSQL may cancel transactions that then
+                    need retries. Explicit resource locks are simpler for the
+                    assumed load.
                   </td>
                 </tr>
                 <tr>
                   <td><code>SKIP LOCKED</code></td>
                   <td>
-                    Can skip resources held by a transaction that later rolls
-                    back and produce timing-dependent false conflicts.
+                    May skip a resource held by a transaction that later rolls
+                    back, causing a false unavailable result.
                   </td>
                 </tr>
                 <tr>
                   <td>Redis/distributed lock</td>
                   <td>
-                    Adds a second coordination system while PostgreSQL already
-                    owns authoritative state.
+                    Adds another locking system even though PostgreSQL already
+                    stores the booking data.
                   </td>
                 </tr>
                 <tr>
                   <td>Microservices / CQRS / Kafka</td>
                   <td>
-                    No independent ownership or asynchronous workflow justifies
-                    splitting the consistency boundary.
+                    The booking flow needs one transaction, so splitting it into
+                    multiple services adds unnecessary complexity.
                   </td>
                 </tr>
               </tbody>
@@ -1191,12 +1179,10 @@
         </section>
 
         <section id="model">
-          <h2>5. Logical data model and database invariants</h2>
+          <h2>5. Data model and database rules</h2>
           <p>
-            The ERD shows the minimum relational model needed to prove the
-            booking contract. It intentionally omits audit columns and secondary
-            indexes so the reviewer can see ownership, qualification and
-            resource assignment at a glance.
+            The ERD shows the main data needed for the booking flow. Audit
+            columns and secondary indexes are omitted for clarity.
           </p>
           <figure>
             <svg
@@ -1508,13 +1494,12 @@
               </g>
             </svg>
             <figcaption>
-              Logical ERD. <code>appointments</code> is the authoritative
-              assignment record; the qualification join controls eligibility,
-              while temporal constraints protect the vehicle, bay and
-              technician.
+              <code>appointments</code> stores the selected vehicle, bay and
+              technician. <code>technician_qualifications</code> records which
+              services each technician can perform.
             </figcaption>
           </figure>
-          <h3>Database invariants</h3>
+          <h3>Database rules</h3>
           <ul class="checklist">
             <li><code>end_time &gt; start_time</code>.</li>
             <li>
@@ -1531,30 +1516,29 @@
             </li>
             <li>
               The assigned technician must be qualified and all assigned
-              resources belong to the requested dealership; these cross-table
-              rules are validated inside the locked transaction.
+              resources must belong to the requested dealership. These rules are
+              checked inside the transaction.
             </li>
           </ul>
           <p>
-            <code>status</code> is retained because future cancellation must
-            release capacity without deleting appointment history; temporal
-            exclusion applies only to capacity-holding states such as
-            <code>CONFIRMED</code>.
+            The <code>status</code> field allows a future cancellation to
+            release resources without deleting appointment history. Only
+            <code>CONFIRMED</code> appointments reserve capacity.
           </p>
         </section>
 
         <section id="api">
-          <h2>6. API contract and failure semantics</h2>
+          <h2>6. API and error handling</h2>
           <p>
-            The implementation exposes the smallest reviewable slice that proves
-            durable booking, read-back and operational readiness.
+            The API creates appointments, reads confirmed appointments and
+            reports service health.
           </p>
           <div class="callout">
-            <strong>Availability requirement.</strong> R2 is satisfied by the
-            authoritative availability check inside
-            <code>POST /appointments</code>. The brief does not require a
-            separate read endpoint; a standalone advisory
-            <code>GET /availability</code> is deferred as a UX optimization.
+            <strong>Availability check.</strong> The booking request checks
+            current availability before confirmation. A separate
+            <code>GET /availability</code> endpoint can later provide a preview
+            for the UI, but the final check remains part of
+            <code>POST /appointments</code>.
           </div>
           <div class="table-scroll">
             <table>
@@ -1585,7 +1569,9 @@
                     <code>/api/v1/health/live</code>,
                     <code>/api/v1/health/ready</code>
                   </td>
-                  <td>Separate process liveness from dependency readiness.</td>
+                  <td>
+                    Report whether the API is running and the database is ready.
+                  </td>
                   <td><code>200 / 503</code></td>
                 </tr>
               </tbody>
@@ -1593,7 +1579,7 @@
           </div>
           <div class="grid">
             <div>
-              <h4>Request (as built)</h4>
+              <h4>Create appointment request</h4>
               <pre>
 POST /api/v1/appointments
 
@@ -1626,15 +1612,15 @@ Location: /api/v1/appointments/{id}
             </div>
           </div>
           <p>
-            The assessment API accepts <code>customerId</code> in the body and
-            verifies vehicle ownership. A production API should derive customer
-            identity from an authenticated principal. <code>startTime</code>
-            must be a future instant.
+            The current API accepts <code>customerId</code> in the body and
+            checks that the customer owns the vehicle. In production, the
+            customer identity should come from the signed-in user.
+            <code>startTime</code> must be in the future.
           </p>
           <h3>Errors</h3>
           <p>
             All failures use <code>application/problem+json</code> (RFC 9457)
-            with a stable problem type and correlation ID.
+            with a consistent error type and request ID.
           </p>
           <div class="table-scroll">
             <table>
@@ -1648,7 +1634,7 @@ Location: /api/v1/appointments/{id}
               <tbody>
                 <tr>
                   <td>400</td>
-                  <td>The command is malformed or semantically invalid.</td>
+                  <td>The request is invalid.</td>
                   <td>
                     Invalid timestamp, unknown field, non-UUID id, or a
                     <code>startTime</code> in the past.
@@ -1656,69 +1642,61 @@ Location: /api/v1/appointments/{id}
                 </tr>
                 <tr>
                   <td>404</td>
-                  <td>
-                    A required reference cannot be resolved in the request
-                    scope.
-                  </td>
+                  <td>Required data cannot be found.</td>
                   <td>Unknown vehicle or service type.</td>
                 </tr>
                 <tr>
                   <td>409 · <code>RESOURCES_UNAVAILABLE</code></td>
                   <td>
                     The vehicle is already booked for the interval, or no
-                    complete bay and qualified-technician pair remains.
+                    complete bay and qualified technician pair remains.
                   </td>
                   <td>Client selects another start time.</td>
                 </tr>
                 <tr>
                   <td>409 · <code>REFERENCE_CONFLICT</code></td>
                   <td>
-                    The referenced entities are inconsistent, such as a vehicle
-                    that belongs to another customer.
+                    The request contains conflicting data, such as a vehicle
+                    belonging to another customer.
                   </td>
                   <td>Client corrects the request references.</td>
                 </tr>
                 <tr>
                   <td>503 · <code>TRANSIENT_FAILURE</code></td>
                   <td>
-                    A proven PostgreSQL deadlock, lock timeout or statement
-                    cancellation, Prisma <code>P2034</code>, or a structured
-                    Prisma interactive-transaction timeout; the command itself
-                    is valid. Generic <code>P2028</code> errors without numeric
-                    timeout metadata are not classified as retryable.
+                    A temporary database problem, such as a deadlock or lock
+                    timeout.
                   </td>
                   <td>
                     Client may retry after the <code>Retry-After</code> hint.
-                    Internal bounded retry needs an explicit budget, backoff and
-                    observability, so it is deferred.
+                    Automatic server retry can be added later.
                   </td>
                 </tr>
                 <tr>
                   <td>500</td>
                   <td>Unexpected failure; internals are not exposed.</td>
-                  <td>Correlation ID returned for support.</td>
+                  <td>Request ID returned for support.</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <h3>Deferred: idempotent creation</h3>
+          <h3>Future: safe request retries</h3>
           <p>
-            A later milestone may persist an <code>Idempotency-Key</code> and
-            canonical request hash in the booking transaction, replaying the
-            original response for an identical retry and rejecting key reuse
-            with a different payload.
+            A future version can accept an <code>Idempotency-Key</code>.
+            Repeating the same request with the same key returns the original
+            result, while using the key with different data is rejected.
           </p>
         </section>
 
         <section id="quality">
-          <h2>7. Quality attributes, operations and verification</h2>
+          <h2>7. Reliability, operations and verification</h2>
           <h3>Verification strategy</h3>
           <div class="table-scroll">
             <table>
               <thead>
                 <tr>
                   <th>Test</th>
-                  <th>What it proves</th>
+                  <th>Expected result</th>
                   <th>Environment</th>
                 </tr>
               </thead>
@@ -1726,13 +1704,13 @@ Location: /api/v1/appointments/{id}
                 <tr>
                   <td>Interval construction</td>
                   <td>
-                    Valid start and duration derive a protected UTC end instant;
-                    malformed inputs are rejected.
+                    A valid start time and duration produce the correct UTC end
+                    time; invalid input is rejected.
                   </td>
                   <td>Pure unit tests</td>
                 </tr>
                 <tr>
-                  <td>Qualification/allocation</td>
+                  <td>Resource selection</td>
                   <td>
                     Only a valid bay and qualified technician can be selected.
                   </td>
@@ -1742,184 +1720,133 @@ Location: /api/v1/appointments/{id}
                   <td>Database constraint</td>
                   <td>
                     Direct vehicle, bay and technician conflicts are rejected
-                    even when the application is bypassed.
+                    even when data is written outside the normal API.
                   </td>
                   <td>Real PostgreSQL</td>
                 </tr>
                 <tr>
                   <td><strong>Concurrent race</strong></td>
                   <td>
-                    Two transactions compete for one pair: exactly one commits,
-                    the other returns a conflict, one confirmed row remains.
+                    When two requests compete for one resource pair, exactly one
+                    succeeds and one appointment is stored.
                   </td>
-                  <td>Testcontainers (gateway barrier)</td>
+                  <td>Testcontainers + PostgreSQL</td>
                 </tr>
                 <tr>
-                  <td>Concurrent second-pair allocation</td>
+                  <td>Concurrent bookings with two pairs</td>
                   <td>
-                    Two different vehicles contend at the same instant, then
-                    both commit on distinct complete pairs after the waiting
-                    transaction rechecks committed availability. The same
-                    vehicle is rejected independently of spare resources.
+                    Two different vehicles can use separate resource pairs at
+                    the same time, while the same vehicle cannot be booked
+                    twice.
                   </td>
-                  <td>Testcontainers (gateway barrier)</td>
-                </tr>
-                <tr>
-                  <td>Blocked concurrent mutation</td>
-                  <td>
-                    While a booking holds its locks, a competing vehicle
-                    reassignment, service-type change or qualification
-                    revocation must wait for commit (proven via lock timeout).
-                  </td>
-                  <td>Real PostgreSQL</td>
-                </tr>
-                <tr>
-                  <td>Driver error contract</td>
-                  <td>
-                    The real adapter error shapes for exclusion violations
-                    (<code>23P01</code>), lock timeouts and Prisma interactive-
-                    transaction timeouts are recognized by the failure
-                    classification, not assumed.
-                  </td>
-                  <td>Real PostgreSQL</td>
+                  <td>Testcontainers + PostgreSQL</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <h3>Assessment runtime</h3>
+          <h3>Runtime and deployment</h3>
           <p>
-            Compose applies committed migrations and reruns an idempotent seed
-            at startup, but does not delete appointments by default; retained
-            PostgreSQL volumes therefore survive app restarts. Resetting the
-            deterministic demo vehicle is an explicit assessment command. The
-            built runtime image also contains the pinned pnpm version, so its
-            entrypoint does not depend on npm registry access after the image
-            has been built. Production would still separate migrations and demo
-            seeding from application startup.
+            Docker Compose starts the API and PostgreSQL, applies database
+            migrations and loads demo data. Appointments remain after a restart.
+            In production, migrations and demo data setup would run separately
+            from application startup.
           </p>
           <h3>Observability</h3>
           <p>
-            Structured JSON logging with request correlation is implemented. The
-            metrics and tracing below are the target design and are
-            <strong>deferred to the next milestone</strong>.
+            The current version writes structured JSON logs with request IDs.
+            Metrics and tracing are planned for a later version.
           </p>
           <ul>
             <li>
-              <strong>Logs (implemented):</strong> structured JSON with a
-              per-request correlation ID echoed in the
-              <code>x-request-id</code> response header, plus a structured
-              booking outcome event (<code>booking_confirmed</code> /
-              <code>booking_rejected</code> with the rejection code, dealership
-              and service-type IDs, and duration). HTTP request logs redact
-              <code>Authorization</code> and <code>Cookie</code>; unexpected
-              errors omit raw messages and stacks.
+              <strong>Logs:</strong> include the request ID, booking result,
+              dealership, service type and processing time. Authorization and
+              cookie values are removed.
             </li>
             <li>
-              <strong>Metrics (planned):</strong>
-              <code>booking_creation_total{result}</code>,
-              <code>booking_creation_duration_seconds</code>,
-              <code>booking_conflict_total{resource_type}</code>,
-              <code>booking_transaction_retry_total{reason}</code>,
-              connection-pool saturation.
+              <strong>Metrics (planned):</strong> booking results, booking time,
+              conflicts, database lock waits and connection-pool usage.
             </li>
             <li>
-              <strong>Tracing (planned):</strong> HTTP → validation → allocation
-              → insert → commit, with lock/retry events.
+              <strong>Tracing (planned):</strong> follow a booking from the HTTP
+              request through validation, resource selection and database
+              commit.
             </li>
             <li>
-              <strong>Initial alerts (planned):</strong> error-budget burn,
-              contention rate and pool saturation, with thresholds calibrated
-              only after a load-test baseline exists.
+              <strong>Alerts (planned):</strong> notify the team about repeated
+              server errors, long lock waits or a nearly full connection pool.
+              Alert thresholds will be set after load testing.
             </li>
           </ul>
-          <h3>Capacity assumptions and evolution thresholds</h3>
+          <h3>Capacity and future scaling</h3>
           <p>
-            The initial sizing hypothesis is 5–20 bays, 10–50 qualified
-            technicians and a few booking writes per second per dealership. A
-            500&nbsp;ms P95 booking target is unmeasured and must be validated
-            by load tests. Sustained contention or a missed latency target is
-            the trigger to replace per-candidate overlap checks with a set-based
-            query and narrow lock scope behind the existing allocation port;
-            correctness still ends at PostgreSQL exclusion constraints.
+            The design assumes a small dealership with modest booking traffic.
+            If load tests show many requests waiting or slow bookings, the
+            system can check resources in one query and lock fewer rows.
+            Database rules will continue to prevent overlapping bookings.
           </p>
         </section>
 
         <section id="ai">
-          <h2>8. AI collaboration, ownership and scope control</h2>
+          <h2>8. AI collaboration during design</h2>
           <p>
-            I use AI through a
-            <strong>Frame → Challenge → Verify → Own</strong> workflow: frame
-            the invariant, challenge suggestions for hidden assumptions and
-            failure modes, verify accepted claims against the brief, primary
-            sources and executable artifacts, then own the final decision and
-            wording.
+            I used AI to explore design options and identify possible problems.
+            I provided the context, reviewed the suggestions and made the final
+            decisions.
           </p>
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>AI output</th>
-                  <th>My challenge</th>
-                  <th>Decision</th>
-                  <th>Evidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Check availability, then insert the appointment.</td>
-                  <td>
-                    Two requests can observe the same free pair before either
-                    insert commits: a TOCTOU race.
-                  </td>
-                  <td>
-                    Lock candidates, re-check after any wait, then retain
-                    exclusion constraints as the final guard.
-                  </td>
-                  <td>
-                    PostgreSQL concurrency tests and exclusion migrations.
-                  </td>
-                </tr>
-                <tr>
-                  <td>
-                    Classify every Prisma <code>P2028</code> as retryable.
-                  </td>
-                  <td>
-                    A generic transaction error does not prove a transient
-                    PostgreSQL failure.
-                  </td>
-                  <td>
-                    Retry semantics are limited to known SQLSTATEs and Prisma
-                    <code>P2034</code>, plus the structured <code>P2028</code>
-                    interactive-transaction timeout subtype with numeric timeout
-                    metadata.
-                  </td>
-                  <td>
-                    Classifier unit tests plus real lock-timeout and
-                    transaction- timeout integration tests.
-                  </td>
-                </tr>
-                <tr>
-                  <td>
-                    Allow the same vehicle when a different bay and technician
-                    are available.
-                  </td>
-                  <td>This violates the document's central invariant.</td>
-                  <td>
-                    Add a vehicle-time exclusion constraint independent of
-                    resource availability.
-                  </td>
-                  <td>
-                    Migration <code>202607130003</code> and PostgreSQL
-                    integration tests.
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="decision">
+            <div class="label">1 · Requirements</div>
+            <div>
+              I used AI to identify missing details and possible assumptions. I
+              reviewed the options and chose the requirements and assumptions
+              used in this design (section 2).
+            </div>
+          </div>
+          <div class="decision">
+            <div class="label">2 · Architecture</div>
+            <div>
+              I described the user flow, data flow and expected components. AI
+              suggested different structures, and I chose a modular monolith
+              because it keeps the booking transaction simple while preserving
+              clear module boundaries.
+            </div>
+          </div>
+          <div class="decision">
+            <div class="label">3 · Failure modes</div>
+            <div>
+              AI helped me compare <code>SERIALIZABLE</code>,
+              <code>SKIP LOCKED</code>, database constraints and distributed
+              locks. Based on the assumed small scale, I chose to lock all
+              suitable resources. This makes concurrent bookings wait, but keeps
+              the design simple. I rejected a separate “check then insert” flow
+              because two requests could select the same resources.
+            </div>
+          </div>
+          <div class="decision">
+            <div class="label">4 · API &amp; data</div>
+            <div>
+              I chose REST, RFC 9457 error responses and the main data
+              relationships. AI helped draft the API and data model, which I
+              reviewed and corrected.
+            </div>
+          </div>
+          <div class="decision">
+            <div class="label">5 · Observability</div>
+            <div>
+              I chose structured logs with request IDs for the current design.
+              Metrics and tracing remain future design work.
+            </div>
+          </div>
+          <div class="decision">
+            <div class="label">6 · This document</div>
+            <div>
+              AI helped draft each section from my direction. I reviewed the
+              structure, technical decisions and final wording.
+            </div>
           </div>
           <div class="callout warn">
             <strong>Data boundary.</strong> No secrets, production credentials
-            or customer data were supplied to AI tools. AI output is treated as
-            an untrusted proposal, not evidence.
+            or customer data were shared with AI tools. I reviewed AI output
+            before including it in the design.
           </div>
         </section>
 
