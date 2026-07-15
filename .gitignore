@@ -7,6 +7,5 @@ coverage/
 .DS_Store
 tmp/
 .superpowers/
-docs/superpowers/
-docs/system-design.html
+docs/*
 *.pdf
