@@ -8,4 +8,5 @@ coverage/
 tmp/
 .superpowers/
 docs/superpowers/
+docs/system-design.html
 *.pdf
