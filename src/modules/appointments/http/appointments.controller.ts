@@ -109,8 +109,7 @@ export class AppointmentsController {
     content: problemContent(ProblemDetailsResponse),
   })
   async findOne(
-    // The array-message factory routes this through the same VALIDATION_ERROR
-    // problem-details contract as DTO validation failures.
+    // Reuse the DTO validation error shape.
     @Param(
       'id',
       new ParseUUIDPipe({

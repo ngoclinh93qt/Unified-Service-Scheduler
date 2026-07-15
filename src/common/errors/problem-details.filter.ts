@@ -62,8 +62,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     }
 
     if (problem.code === 'TRANSIENT_FAILURE') {
-      // The command may succeed on retry once the contention clears; internal
-      // retry is deferred, so surface the hint to the client instead.
+      // Internal retry is deferred, so tell the client when to retry.
       response.setHeader('Retry-After', '1');
     }
 
@@ -162,8 +161,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   }
 }
 
-// class-validator messages lead with the property name, except whitelist
-// violations which are phrased "property <name> should not exist".
+// Whitelist violations use "property <name>" instead of "<name>".
 function fieldFromValidationMessage(message: string): string {
   const words = message.split(' ');
   return (words[0] === 'property' ? words[1] : words[0]) ?? '';

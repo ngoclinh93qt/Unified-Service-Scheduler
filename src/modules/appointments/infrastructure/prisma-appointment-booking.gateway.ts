@@ -29,14 +29,11 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
     try {
       return await this.prisma.$transaction(
         async (transaction) => this.bookInTransaction(transaction, command),
-        // Bound how long a booking may queue behind other dealership bookings
-        // and how long it may hold the candidate row locks.
+        // Bound queue and transaction time under contention.
         { maxWait: 5_000, timeout: 10_000 },
       );
     } catch (error) {
-      // Deadlocks, lock/transaction timeouts and cancelled statements are
-      // retryable contention outcomes, not internal faults. Internal retry is
-      // deferred; expose them as 503 so clients can retry deliberately.
+      // Internal retry is deferred; clients receive a retryable 503.
       if (isTransientFailure(error)) {
         throw new ApplicationError(
           'TRANSIENT_FAILURE',
@@ -58,13 +55,7 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
     transaction: Prisma.TransactionClient,
     command: CreateAppointmentCommand,
   ): Promise<BookedAppointment> {
-    // Share-lock the reference rows for the lifetime of the transaction:
-    // concurrent bookings can hold the same share locks, but a competing
-    // mutation (vehicle reassignment, service-type deactivation or duration
-    // change) must wait for this booking to commit. The validated ownership
-    // and duration therefore still hold at commit time. The interval itself is
-    // snapshotted on the appointment, so later reference changes do not rewrite
-    // history.
+    // Keep validated ownership and service duration stable until commit.
     const [customer] = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
       SELECT id FROM customers WHERE id = ${command.customerId}::uuid FOR SHARE
     `);
@@ -110,10 +101,7 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
       ORDER BY b.id
       FOR UPDATE
     `);
-    // Lock the qualification rows as well as the technicians: a concurrent
-    // revocation must wait for this booking to commit, so a confirmed
-    // appointment can never reference a technician whose qualification was
-    // already removed at commit time.
+    // Prevent qualification revocation before the booking commits.
     const technicians = await transaction.$queryRaw<Candidate[]>(Prisma.sql`
       SELECT t.id
       FROM technicians t
@@ -179,10 +167,7 @@ export class PrismaAppointmentBookingGateway implements AppointmentBookingGatewa
       });
       return toBookedAppointment(appointment);
     } catch (error) {
-      // Defense in depth: the row locks above already prevent a race, but the
-      // database exclusion constraints are the final authority on temporal
-      // non-overlap. A violation means the interval was taken; surface it as a
-      // conflict rather than an internal error.
+      // Database constraints are the final overlap safeguard.
       if (isExclusionViolation(error)) throw resourcesUnavailable();
       throw error;
     }
@@ -212,53 +197,48 @@ async function firstAvailableCandidate(
 }
 
 const EXCLUSION_VIOLATION = '23P01';
-// deadlock_detected, lock_not_available, query_canceled (statement timeout),
-// and Prisma's documented write-conflict/deadlock outcome. P2028 is a generic
-// Transaction API error and must not be treated as retryable wholesale; only
-// its structured interactive-transaction timeout subtype is transient.
+// P2028 is only transient when its metadata proves a transaction timeout.
 const TRANSIENT_CODES = new Set(['40P01', '55P03', '57014', 'P2034']);
 
-// Prisma driver adapters wrap the PostgreSQL error: the SQLSTATE lives on the
-// `cause` chain (DriverAdapterError -> { kind: 'postgres', code: '23P01' }),
-// so walk the chain instead of trusting one fixed shape.
-function causeChainHasCode(
+type ErrorCause = Readonly<{
+  code?: unknown;
+  meta?: { timeout?: unknown; timeTaken?: unknown };
+  cause?: unknown;
+}>;
+
+// Prisma driver adapters may place SQLSTATE on a nested cause.
+function causeChainSome(
   error: unknown,
-  matches: (code: unknown) => boolean,
+  matches: (candidate: ErrorCause) => boolean,
 ): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 5; depth += 1) {
     if (typeof current !== 'object' || current === null) return false;
-    if (matches((current as { code?: unknown }).code)) return true;
-    current = (current as { cause?: unknown }).cause;
+    const candidate = current as ErrorCause;
+    if (matches(candidate)) return true;
+    current = candidate.cause;
   }
   return false;
 }
 
 export function isExclusionViolation(error: unknown): boolean {
-  return causeChainHasCode(error, (code) => code === EXCLUSION_VIOLATION);
+  return causeChainSome(error, ({ code }) => code === EXCLUSION_VIOLATION);
 }
 
 export function isTransientFailure(error: unknown): boolean {
   return (
-    causeChainHasCode(
+    causeChainSome(
       error,
-      (code) => typeof code === 'string' && TRANSIENT_CODES.has(code),
+      ({ code }) => typeof code === 'string' && TRANSIENT_CODES.has(code),
     ) || causeChainHasStructuredTransactionTimeout(error)
   );
 }
 
 function causeChainHasStructuredTransactionTimeout(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 5; depth += 1) {
-    if (typeof current !== 'object' || current === null) return false;
-    const candidate = current as {
-      code?: unknown;
-      meta?: { timeout?: unknown; timeTaken?: unknown };
-      cause?: unknown;
-    };
+  return causeChainSome(error, (candidate) => {
     const timeout = candidate.meta?.timeout;
     const timeTaken = candidate.meta?.timeTaken;
-    if (
+    return (
       candidate.code === 'P2028' &&
       typeof timeout === 'number' &&
       Number.isFinite(timeout) &&
@@ -266,12 +246,8 @@ function causeChainHasStructuredTransactionTimeout(error: unknown): boolean {
       typeof timeTaken === 'number' &&
       Number.isFinite(timeTaken) &&
       timeTaken >= timeout
-    ) {
-      return true;
-    }
-    current = candidate.cause;
-  }
-  return false;
+    );
+  });
 }
 
 function referenceNotFound(reference: string): ApplicationError {

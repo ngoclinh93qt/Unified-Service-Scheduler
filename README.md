@@ -128,7 +128,7 @@ git diff --check
 
 Test boundaries are intentional:
 
-- Unit tests cover interval rules, application decisions, controllers, health behavior, and safe failure translation.
+- Unit tests cover interval rules, application decisions, health behavior, and safe failure translation.
 - Integration tests use real PostgreSQL for allocation, locking, rollback, overlap, and competing-request claims.
 - End-to-end tests exercise the public HTTP contract against a real application and PostgreSQL.
 

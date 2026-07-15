@@ -23,8 +23,7 @@ describe('PrismaAppointmentBookingGateway dependency injection', () => {
 });
 
 describe('failure classification', () => {
-  // Mirrors the observed driver-adapter shape: the SQLSTATE sits on the cause
-  // chain, not on the top-level error.
+  // Mirrors the observed nested driver-adapter error.
   function driverError(code: string): Error {
     const error = new Error('driver failure');
     (error as Error & { cause: unknown }).cause = { kind: 'postgres', code };

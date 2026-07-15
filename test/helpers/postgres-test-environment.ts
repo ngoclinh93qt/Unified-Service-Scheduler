@@ -15,8 +15,7 @@ export type PostgresTestEnvironment = Readonly<{
 
 export async function startPostgresTestEnvironment(): Promise<PostgresTestEnvironment> {
   const previousRyukSetting = process.env.TESTCONTAINERS_RYUK_DISABLED;
-  // This local Docker environment cannot start Ryuk. Keep the workaround scoped
-  // to container creation; explicit stop() below remains the cleanup authority.
+  // Explicit stop() replaces Ryuk in environments where it cannot start.
   process.env.TESTCONTAINERS_RYUK_DISABLED = 'true';
   let container: StartedTestContainer;
   try {

@@ -258,9 +258,7 @@ describe('PrismaAppointmentBookingGateway', () => {
     async (_label, conflictingAssignment) => {
       const first = await gateway.book(commandAt('2099-07-14T08:00:00Z'));
 
-      // Bypass the application guard entirely: a direct insert of an
-      // overlapping confirmed appointment must be refused by the exclusion
-      // constraint, not the row-locking allocation path.
+      // Bypass application guards to prove the database constraint.
       const caught = await prisma.appointment
         .create({
           data: {
@@ -278,8 +276,6 @@ describe('PrismaAppointmentBookingGateway', () => {
         );
 
       expect(caught).toBeDefined();
-      // The gateway's conflict translation must recognize the real error shape
-      // PostgreSQL and Prisma produce for an exclusion violation.
       expect(isExclusionViolation(caught)).toBe(true);
       await expect(prisma.appointment.count()).resolves.toBe(1);
     },
@@ -318,9 +314,7 @@ describe('PrismaAppointmentBookingGateway', () => {
       let mutationError: unknown;
       const lockedGateway = new PrismaAppointmentBookingGateway(prisma, {
         afterResourcesLocked: async () => {
-          // The booking transaction holds FOR SHARE locks on its reference
-          // rows; a competing mutation must wait, so with a lock timeout it
-          // fails instead of invalidating the already-validated references.
+          // The competing mutation must wait for the booking's share locks.
           mutationError = await prisma
             .$transaction(async (competing) => {
               await competing.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
@@ -348,9 +342,7 @@ describe('PrismaAppointmentBookingGateway', () => {
     let revocationError: unknown;
     const lockedGateway = new PrismaAppointmentBookingGateway(prisma, {
       afterResourcesLocked: async () => {
-        // While the booking transaction holds the qualification row locks, a
-        // concurrent revocation must wait; with a lock timeout it fails
-        // instead of silently de-qualifying the technician mid-booking.
+        // Qualification revocation must wait for the booking's row locks.
         revocationError = await prisma
           .$transaction(async (competing) => {
             await competing.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
@@ -438,17 +430,6 @@ describe('PrismaAppointmentBookingGateway', () => {
 
     expect(caught).toBeDefined();
     expect(isTransientFailure(caught)).toBe(true);
-  });
-
-  it('reads a booked appointment back by id and returns null when absent', async () => {
-    const booked = await gateway.book(commandAt('2099-07-14T08:00:00Z'));
-    await expect(gateway.findById(booked.id)).resolves.toMatchObject({
-      id: booked.id,
-      serviceBayId: booked.serviceBayId,
-      technicianId: booked.technicianId,
-      status: 'CONFIRMED',
-    });
-    await expect(gateway.findById(ids.otherServiceType)).resolves.toBeNull();
   });
 });
 

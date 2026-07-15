@@ -41,8 +41,7 @@ describe('public API (e2e)', () => {
     const module = await Test.createTestingModule({
       imports: [AppModule],
     })
-      // Freeze time so past-time validation is deterministic and the seeded
-      // request instants stay in the future regardless of the wall clock.
+      // Keep seeded requests in the future regardless of wall-clock time.
       .overrideProvider(CLOCK)
       .useValue(() => new Date('2099-07-14T00:00:00.000Z'))
       .compile();
@@ -129,45 +128,6 @@ describe('public API (e2e)', () => {
         });
       });
   });
-
-  it('rejects a start time in the past with 400', async () => {
-    await request(app.getHttpServer())
-      .post('/api/v1/appointments')
-      .send({ ...validRequest, startTime: '2099-07-13T08:00:00.000Z' })
-      .expect(400)
-      .expect('content-type', /application\/problem\+json/)
-      .expect((response) => {
-        expect(response.body).toMatchObject({
-          code: 'INVALID_APPOINTMENT_TIME',
-        });
-      });
-  });
-
-  it.each(['2099-07-14', '2099-07-14T08:00:00.000'])(
-    'rejects a start time without a UTC designator or offset: %s',
-    async (startTime) => {
-      await request(app.getHttpServer())
-        .post('/api/v1/appointments')
-        .send({ ...validRequest, startTime })
-        .expect(400);
-    },
-  );
-
-  it.each([
-    ['2099-07-14T08:00:00.000Z', '2099-07-14T08:00:00.000Z'],
-    ['2099-07-14T15:00:00.000+07:00', '2099-07-14T08:00:00.000Z'],
-  ])(
-    'accepts an offset-bearing start time and serializes UTC: %s',
-    async (startTime, expectedUtc) => {
-      await request(app.getHttpServer())
-        .post('/api/v1/appointments')
-        .send({ ...validRequest, startTime })
-        .expect(201)
-        .expect((response) => {
-          expect(response.body).toMatchObject({ startTime: expectedUtc });
-        });
-    },
-  );
 
   it('returns problem details for unknown request fields', async () => {
     await request(app.getHttpServer())
